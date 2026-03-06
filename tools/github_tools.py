@@ -40,7 +40,15 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
     for item in tree.get("tree", []):
         if count >= limit:
             break
-        if item["type"] == "blob" and item["path"] in key_paths:
+        
+        path_name = item["path"].split("/")[-1]
+        is_key_file = (
+            item["path"] in key_paths or 
+            path_name.startswith("Dockerfile.") or 
+            path_name.endswith(".Dockerfile")
+        )
+        
+        if item["type"] == "blob" and is_key_file:
             content_url = f"https://raw.githubusercontent.com/{repo}/{meta['default_branch']}/{item['path']}"
             key_files[item["path"]] = requests.get(content_url, headers=headers).text[:4000]
             count += 1
@@ -49,7 +57,6 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
         "repo_full_name": meta["full_name"],
         "default_branch": meta["default_branch"],
         "language": meta.get("language"),
-        "stargazers_count": meta.get("stargazers_count", 0),
         "key_files": key_files,
         "dirs": [i["path"] for i in tree.get("tree", []) if i["type"] == "tree"][:20],
     }

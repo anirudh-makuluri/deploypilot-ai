@@ -1,10 +1,11 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 from langchain_aws import ChatBedrock
 from tools.github_tools import fetch_repo_structure
 import json
 import os
 import time
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -34,40 +35,24 @@ llm_nginx = ChatBedrock(
 )
 
 def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Calls GitHub tool via Gemini to populate repo_scan."""
-    prompt = f"""
-You are a repo scanner preparing for deployment.
-
-Goal:
-- Use the `fetch_repo_structure` tool to inspect this GitHub repo.
-- Do NOT try to infer stack manually, just call the tool.
-
-Repo URL: {state['repo_url']}
-GitHub Token: {state['github_token']}
-Max Files: {state['max_files']}
-"""
-
-    resp = scanner_model.invoke(prompt)
-
-    if resp.tool_calls:
-        # single tool call expected
-        tool_call = resp.tool_calls[0]
-        tool_args = tool_call["args"]
-        # enforce token and max_files from state
-        tool_args.setdefault("repo_url", state["repo_url"])
-        tool_args.setdefault("github_token", state["github_token"])
-        tool_args.setdefault("max_files", state.get("max_files", 50))
-        scan = fetch_repo_structure.invoke(tool_args)
-        state["repo_scan"] = scan
-    else:
-        # fallback: no tool call
-        state["repo_scan"] = {}
-	
+    """Calls GitHub tool directly to populate repo_scan."""
+    
+    scan = fetch_repo_structure.invoke({
+        "repo_url": state["repo_url"],
+        "github_token": state["github_token"],
+        "max_files": state.get("max_files", 50)
+    })
+    
+    state["repo_scan"] = scan
     return state
 
+class PlannerOutput(BaseModel):
+    detected_stack: str = Field(description="Describe the stack, e.g. 'Node.js Express API with Postgres'")
+    services_needed: List[str] = Field(description="List of external services needed, e.g. ['postgres']")
+    entry_port: int = Field(description="The primary HTTP port (guess 3000 for Node, 8000 for Python if unclear)")
 
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Infer stack, services, and port from repo_scan."""
+    """Infer stack, services, and port from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
 
     prompt = f"""
@@ -80,29 +65,15 @@ Task:
 1. Describe the stack, e.g. "Node.js Express API with Postgres".
 2. Decide which external services are needed as a JSON list, e.g. ["postgres"].
 3. Infer the primary HTTP port (guess 3000 for Node, 8000 for Python if unclear).
-
-Return JSON:
-{{
-  "detected_stack": "...",
-  "services_needed": ["postgres"],
-  "entry_port": 3000
-}}
 """
 
-    resp = llm_planner.invoke(prompt)
+    structured_llm = llm_planner.with_structured_output(PlannerOutput)
     
-    # Clean up markdown JSON
-    content = resp.content.strip()
-    if content.startswith("```json"):
-        content = content[7:-3].strip()
-    elif content.startswith("```"):
-        content = content[3:-3].strip()
-        
     try:
-        data = json.loads(content)
-        state["detected_stack"] = data.get("detected_stack", "unknown")
-        state["services_needed"] = data.get("services_needed", [])
-        state["entry_port"] = data.get("entry_port", 3000)
+        data = structured_llm.invoke(prompt)
+        state["detected_stack"] = data.detected_stack
+        state["services_needed"] = data.services_needed
+        state["entry_port"] = data.entry_port
     except Exception as e:
         state["detected_stack"] = "unknown"
         state["services_needed"] = []
