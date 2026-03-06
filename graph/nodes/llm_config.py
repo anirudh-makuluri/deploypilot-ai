@@ -8,35 +8,49 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240
 
 llm_planner = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.1}
+    model_kwargs={"temperature": 0.1, "max_tokens": 4096}
 )
 llm_docker = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0}
+    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
 llm_compose = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0}
+    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
 llm_nginx = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0}
+    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
 llm_verifier = ChatBedrock(
     model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0}
+    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
 )
 
 
-def track_token_usage(state: dict, resp) -> None:
-    """Accumulate token usage from an LLM response into the graph state."""
-    if "token_usage" not in state:
-        state["token_usage"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+from langchain_core.callbacks import BaseCallbackHandler
+
+class TokenTracker(BaseCallbackHandler):
+    """Callback handler that tracks token usage across all LLM calls."""
     
-    usage = resp.response_metadata.get("usage", {})
-    state["token_usage"]["input_tokens"] += usage.get("prompt_tokens", 0)
-    state["token_usage"]["output_tokens"] += usage.get("completion_tokens", 0)
-    state["token_usage"]["total_tokens"] += usage.get("total_tokens", 0)
+    def __init__(self):
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.total_tokens = 0
+    
+    def on_llm_end(self, response, **kwargs):
+        # Bedrock puts usage in response.llm_output, not generation_info
+        usage = (response.llm_output or {}).get("usage", {})
+        self.input_tokens += usage.get("prompt_tokens", 0)
+        self.output_tokens += usage.get("completion_tokens", 0)
+        self.total_tokens += usage.get("total_tokens", 0)
+    
+    def get_usage(self):
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens or (self.input_tokens + self.output_tokens)
+        }
 
 
 import re

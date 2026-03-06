@@ -15,8 +15,8 @@ class VerifierOutput(BaseModel):
         """Handle LLM returning risks as a single string instead of a list."""
         if isinstance(data, dict) and isinstance(data.get("risks"), str):
             raw = data["risks"].strip()
-            # Split on newlines that start with - or * or numbered items
-            items = re.split(r'\n\s*[-*•]\s*|\n\s*\d+\.\s*', raw)
+            # Split on: bullet points, numbered items, or quoted-newline separators like "\n"
+            items = re.split(r'"\s*\n\s*"|\\n|\\"\s*\\n\s*\\"|(?:\n\s*[-*•]\s*)|(?:\n\s*\d+\.\s*)', raw)
             # Clean up and filter empty strings
             data["risks"] = [item.strip().strip('"').strip("'") for item in items if item.strip()]
         return data
