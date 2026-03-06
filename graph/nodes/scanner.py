@@ -19,14 +19,19 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     state["commit_sha"] = commit_sha
     
     if supabase and commit_sha != "unknown":
-        try:
-            response = supabase.table("analysis_cache").select("result").eq("repo_url", state["repo_url"]).eq("commit_sha", commit_sha).execute()
-            if response.data and len(response.data) > 0:
-                print(f"Cache hit for {state['repo_url']} at {commit_sha}")
-                state["cached_response"] = response.data[0]["result"]
-                return state
-        except Exception as e:
-            print(f"Supabase cache read error: {e}")
+        for attempt in range(3):
+            try:
+                response = supabase.table("analysis_cache").select("result").eq("repo_url", state["repo_url"]).eq("commit_sha", commit_sha).execute()
+                if response.data and len(response.data) > 0:
+                    print(f"Cache hit for {state['repo_url']} at {commit_sha}")
+                    state["cached_response"] = response.data[0]["result"]
+                    return state
+                break  # Query succeeded but returned no data, exit retry loop
+            except Exception as e:
+                print(f"Supabase cache read error (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    import time
+                    time.sleep(1)
     
     state["repo_scan"] = scan
     return state

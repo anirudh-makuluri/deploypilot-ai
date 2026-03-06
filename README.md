@@ -1,6 +1,6 @@
-# sd-artifacts Repo Analyzer
+# SD-Artifacts Repo Analyzer
 
-sd-artifacts Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude 3 Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
+SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude 3 Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
 
 ## Features
 
@@ -9,7 +9,7 @@ sd-artifacts Repo Analyzer is an intelligent deployment companion that scans Git
 - **Production-Ready Dockerfile Generation:** Creates multi-stage, secure, and optimized Dockerfiles for your application.
 - **Docker Compose Setup:** Generates a `docker-compose.yml` file to handle your application and any required external dependencies for local or dev deployment.
 - **Nginx Reverse Proxy Configuration:** Automatically produces an `nginx.conf` for a secure, production-grade reverse proxy.
-- **RESTful API:** Developed with FastAPI to provide a fast and reliable `/analyze` endpoint for CI/CD or dashboard integration.
+- **RESTful API & Streaming:** Developed with FastAPI to provide a fast `/analyze` endpoint and a real-time `/analyze/stream` Server-Sent Events (SSE) endpoint for CI/CD or dashboard integration.
 
 ## Architecture
 
@@ -71,7 +71,7 @@ graph TD
    # uvicorn app:app --host 0.0.0.0 --port 8080
    ```
 
-2. **Analyze a Repository:**
+2. **Analyze a Repository (Standard):**
    Send a `POST` request to the `/analyze` endpoint:
    
    ```bash
@@ -84,7 +84,31 @@ graph TD
             }'
    ```
 
-3. **Response Structure:**
+3. **Analyze a Repository (Streaming):**
+   For real-time progress, send a `POST` request to the `/analyze/stream` endpoint. It returns Server-Sent Events (SSE):
+   
+   ```bash
+   # Use -N to keep the curl stream open
+   curl -N -X POST http://localhost:8080/analyze/stream \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "github_token": "your_github_personal_access_token"
+            }'
+   ```
+   **Output Format:**
+   ```text
+   event: progress
+   data: {"node": "scanner", "status": "completed"}
+   
+   event: progress
+   data: {"node": "planner", "status": "completed"}
+   ...
+   event: complete
+   data: { ... full JSON response ... }
+   ```
+
+4. **Response Structure:**
    The API will respond with JSON containing the detected stack, services needed, entry port, and all the generated infrastructure code (`dockerfile`, `docker_compose`, `nginx_conf`), alongside identified deployment risks and confidence score.
 
    **Example Response:**

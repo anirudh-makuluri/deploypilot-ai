@@ -1,6 +1,6 @@
 # sd-artifacts — Planned Improvements
 
-## 1. Streaming Responses (SSE)
+## [x] 1. Streaming Responses (SSE)
 - Replace single POST response with Server-Sent Events
 - Stream each node's output as it completes: scanner → planner → dockerfiles → compose → nginx → verifier
 - Frontend gets real-time progress instead of waiting for the full pipeline
@@ -31,7 +31,7 @@
 - Support Helm chart generation for parameterized deployments
 - Add a request flag: `output_format: "compose" | "kubernetes" | "both"`
 
-## 6. Caching & Rate Limiting
+## [x] 6. Caching & Rate Limiting
 - Cache repo scans by `repo_url + commit_sha` to avoid redundant GitHub API calls
 - Use in-memory cache (TTL-based) or Redis for persistence
 - Add rate limiting per API key / IP to prevent abuse

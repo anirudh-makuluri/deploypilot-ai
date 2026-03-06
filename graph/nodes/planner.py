@@ -46,10 +46,37 @@ Tasks:
 IMPORTANT: Look at the directory structure and key_files carefully. If there are multiple package.json or requirements.txt files in different directories, this is likely a monorepo with multiple services.
 """
 
-    structured_llm = llm_planner.with_structured_output(PlannerOutput)
-    
+    prompt += """
+Respond ONLY with a raw JSON object matching this schema. Do not include markdown code block wrappers or any explanations:
+{
+  "is_deployable": boolean,
+  "error_reason": "string (empty if deployable)",
+  "detected_stack": "string",
+  "services": [
+    {
+      "name": "string",
+      "build_context": "string",
+      "port": integer,
+      "dockerfile_path": "string"
+    }
+  ],
+  "has_existing_dockerfiles": boolean,
+  "has_existing_compose": boolean
+}
+"""
+
     try:
-        data = structured_llm.invoke(prompt)
+        # First try parsing it manually
+        response = llm_planner.invoke(prompt)
+        content = response.content.strip()
+        
+        # Strip markdown if the LLM still added it
+        if content.startswith("```"):
+            import re
+            content = re.sub(r"^```(?:json)?\s*\n(.*?)\n```$", r"\1", content, flags=re.DOTALL)
+            
+        json_data = json.loads(content)
+        data = PlannerOutput(**json_data)
         
         if not data.is_deployable:
             state["error"] = data.error_reason or "This repository is not deployable as a web service"
@@ -60,6 +87,10 @@ IMPORTANT: Look at the directory structure and key_files carefully. If there are
         state["has_existing_dockerfiles"] = data.has_existing_dockerfiles
         state["has_existing_compose"] = data.has_existing_compose
     except Exception as e:
-        state["error"] = f"Failed to analyze repository: {e}"
+        # We also grab the raw message to figure out what it generated before failing
+        import traceback
+        error_details = str(e)
+        state["error"] = f"Failed to analyze repository: {error_details}"
+        
         
     return state
