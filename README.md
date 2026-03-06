@@ -15,7 +15,7 @@ DeployPilot-AI Repo Analyzer is an intelligent deployment companion that scans G
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/anirudh-makuluri/deploypilot-ai
    cd deploypilot-ai
    ```
 
