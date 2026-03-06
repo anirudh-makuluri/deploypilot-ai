@@ -28,6 +28,17 @@ llm_verifier = ChatBedrock(
 )
 
 
+def track_token_usage(state: dict, resp) -> None:
+    """Accumulate token usage from an LLM response into the graph state."""
+    if "token_usage" not in state:
+        state["token_usage"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    
+    usage = resp.response_metadata.get("usage", {})
+    state["token_usage"]["input_tokens"] += usage.get("prompt_tokens", 0)
+    state["token_usage"]["output_tokens"] += usage.get("completion_tokens", 0)
+    state["token_usage"]["total_tokens"] += usage.get("total_tokens", 0)
+
+
 import re
 
 def strip_markdown_wrapper(content: str, lang: str = "docker") -> str:

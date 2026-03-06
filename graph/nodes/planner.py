@@ -8,6 +8,7 @@ class ServiceInfo(BaseModel):
     name: str = Field(description="Service name, e.g. 'frontend', 'websocket', 'api'")
     build_context: str = Field(description="Relative path to the service's build context, e.g. '.', './ws-server'")
     port: int = Field(description="The HTTP port the service listens on")
+    dockerfile_path: str = Field(default="", description="Path to the existing Dockerfile for this service if one exists in key_files (e.g. 'Dockerfile', 'Dockerfile.websocket'). Empty string if no existing Dockerfile.")
 
 class PlannerOutput(BaseModel):
     is_deployable: bool = Field(description="Whether this repo can be deployed as a web service. False for mobile apps, doc-only repos, CLI tools, etc.")
@@ -37,7 +38,7 @@ Tasks:
 2. If deployable, analyze the repo structure:
    - Identify ALL services that need to be built (e.g., a monorepo might have a frontend and a websocket server in separate directories)
    - For each service, determine its name, build context directory, and port
-   - Check if the repo already has Dockerfile(s) in key_files
+   - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
    - Check if the repo already has a docker-compose.yml/yaml in key_files
 
 3. Describe the overall tech stack.

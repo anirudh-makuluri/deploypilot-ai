@@ -1,12 +1,25 @@
 from typing import Dict, Any, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import json
+import re
 from .llm_config import llm_verifier
 
 
 class VerifierOutput(BaseModel):
     confidence: float = Field(description="Confidence score from 0.0 to 1.0 on the quality of all generated artifacts")
     risks: List[str] = Field(description="List of identified risks, issues, or warnings about the generated artifacts")
+    
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_risks_to_list(cls, data):
+        """Handle LLM returning risks as a single string instead of a list."""
+        if isinstance(data, dict) and isinstance(data.get("risks"), str):
+            raw = data["risks"].strip()
+            # Split on newlines that start with - or * or numbered items
+            items = re.split(r'\n\s*[-*•]\s*|\n\s*\d+\.\s*', raw)
+            # Clean up and filter empty strings
+            data["risks"] = [item.strip().strip('"').strip("'") for item in items if item.strip()]
+        return data
 
 
 def verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:

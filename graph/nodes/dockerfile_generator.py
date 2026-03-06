@@ -15,17 +15,12 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         svc_name = service["name"]
         build_ctx = service["build_context"]
         port = service["port"]
+        dockerfile_path = service.get("dockerfile_path", "")
         
-        # Check for pre-existing Dockerfile for this service
+        # Look up the pre-existing Dockerfile using the planner-provided path
         existing_dockerfile = None
-        for path, content in key_files.items():
-            filename = path.split("/")[-1]
-            is_dockerfile = filename == "Dockerfile" or filename.startswith("Dockerfile.") or filename.endswith(".Dockerfile")
-            # Match by build context directory
-            file_dir = "/".join(path.split("/")[:-1]) or "."
-            if is_dockerfile and (file_dir == build_ctx.lstrip("./") or (build_ctx == "." and "/" not in path)):
-                existing_dockerfile = content
-                break
+        if dockerfile_path:
+            existing_dockerfile = key_files.get(dockerfile_path)
         
         if existing_dockerfile:
             prompt = f"""

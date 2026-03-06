@@ -66,7 +66,7 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
         
         if item["type"] == "blob" and is_key_file:
             content_url = f"https://raw.githubusercontent.com/{repo}/{meta['default_branch']}/{item['path']}"
-            key_files[item["path"]] = requests.get(content_url, headers=headers).text[:4000]
+            key_files[item["path"]] = requests.get(content_url, headers=headers).text[:10000]
             count += 1
 
     result = {
