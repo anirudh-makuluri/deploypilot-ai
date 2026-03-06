@@ -6,7 +6,8 @@ from .nodes import (
     planner_node,
     dockerfile_generator_node,
     compose_generator_node,
-    nginx_generator_node
+    nginx_generator_node,
+    verifier_node
 )
 
 # State is a plain dict
@@ -14,30 +15,50 @@ workflow = StateGraph(dict)
 
 workflow.add_node("scanner", scanner_node)
 workflow.add_node("planner", planner_node)
-workflow.add_node("compose_gen", compose_generator_node)
 workflow.add_node("docker_gen", dockerfile_generator_node)
+workflow.add_node("compose_gen", compose_generator_node)
 workflow.add_node("nginx_gen", nginx_generator_node)
+workflow.add_node("verifier", verifier_node)
 
-# Edges
-workflow.add_edge("scanner", "planner")
 
-def needs_compose(state: Dict[str, Any]) -> str:
-    return "compose" if state.get("services_needed") else "no_compose"
+# ─── Conditional Edges ──────────────────────────────────────────────────────────
 
-workflow.add_conditional_edges(
-    "planner",
-    needs_compose,
-    {
-        "compose": "compose_gen",
-        "no_compose": "docker_gen",
-    },
-)
+def check_scanner_error(state: Dict[str, Any]) -> str:
+    """Route to END if scanner found an error (e.g., invalid package_path)."""
+    return "error" if state.get("error") else "continue"
 
-workflow.add_edge("compose_gen", "docker_gen")
-workflow.add_edge("docker_gen", "nginx_gen")
-workflow.add_edge("nginx_gen", END)
+def check_planner_error(state: Dict[str, Any]) -> str:
+    """Route to END if planner found the repo is not deployable."""
+    return "error" if state.get("error") else "continue"
+
 
 # Entry point
 workflow.set_entry_point("scanner")
+
+# Scanner -> Planner (or END on error)
+workflow.add_conditional_edges(
+    "scanner",
+    check_scanner_error,
+    {
+        "error": END,
+        "continue": "planner",
+    },
+)
+
+# Planner -> Dockerfile gen (or END on error)
+workflow.add_conditional_edges(
+    "planner",
+    check_planner_error,
+    {
+        "error": END,
+        "continue": "docker_gen",
+    },
+)
+
+# Linear flow: docker_gen -> compose_gen -> nginx_gen -> verifier -> END
+workflow.add_edge("docker_gen", "compose_gen")
+workflow.add_edge("compose_gen", "nginx_gen")
+workflow.add_edge("nginx_gen", "verifier")
+workflow.add_edge("verifier", END)
 
 graph = workflow.compile()

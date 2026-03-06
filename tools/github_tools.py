@@ -7,12 +7,11 @@ class RepoScanInput(BaseModel):
     repo_url: str = Field(..., description="Full GitHub repo URL")
     github_token: str = Field(..., description="User's GitHub token")
     max_files: Optional[int] = Field(20, description="Max files to analyze")
+    package_path: str = Field(".", description="Sub-package path to analyze, '.' for entire repo")
 
 @tool(args_schema=RepoScanInput)
-def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[int] = 20) -> dict:
+def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
     """Fetch repo metadata, file tree, and key file contents for deploy analysis."""
-    print("===============================================")
-    print(f"repo_url: {repo_url}")
     repo = repo_url.split("github.com/")[1].rstrip("/")
 
     headers = {"Authorization": f"token {github_token}"}
@@ -26,24 +25,41 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
         headers=headers,
     ).json()
 
-    key_paths = [
+    all_items = tree.get("tree", [])
+
+    # Validate package_path exists if not root
+    if package_path != ".":
+        package_exists = any(
+            item["type"] == "tree" and item["path"].rstrip("/") == package_path.rstrip("/")
+            for item in all_items
+        )
+        if not package_exists:
+            return {"error": f"Package path '{package_path}' not found in repository"}
+        
+        # Filter tree items to only those under package_path
+        prefix = package_path.rstrip("/") + "/"
+        all_items = [item for item in all_items if item["path"].startswith(prefix) or item["path"] == package_path.rstrip("/")]
+
+    key_filenames = [
         "package.json",
         "requirements.txt",
         "pnpm-lock.yaml",
         "Dockerfile",
         "docker-compose.yml",
+        "docker-compose.yaml",
+        "nginx.conf",
     ]
     key_files = {}
 
     count = 0
     limit = max_files if max_files is not None else 20
-    for item in tree.get("tree", []):
+    for item in all_items:
         if count >= limit:
             break
         
         path_name = item["path"].split("/")[-1]
         is_key_file = (
-            item["path"] in key_paths or 
+            path_name in key_filenames or 
             path_name.startswith("Dockerfile.") or 
             path_name.endswith(".Dockerfile")
         )
@@ -58,6 +74,6 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
         "default_branch": meta["default_branch"],
         "language": meta.get("language"),
         "key_files": key_files,
-        "dirs": [i["path"] for i in tree.get("tree", []) if i["type"] == "tree"][:20],
+        "dirs": [i["path"] for i in all_items if i["type"] == "tree"][:20],
     }
     return result
