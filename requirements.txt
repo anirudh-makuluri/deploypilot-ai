@@ -5,3 +5,4 @@ requests
 pydantic
 python-dotenv
 langchain_aws
+supabase

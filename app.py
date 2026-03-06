@@ -54,8 +54,12 @@ async def analyze_repo(req: AnalyzeRequest):
     # Check for errors from scanner or planner
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
+        
+    if "cached_response" in result:
+        print(f"Returning cached analysis for {req.repo_url}")
+        return AnalyzeResponse(**result["cached_response"])
     
-    return AnalyzeResponse(
+    response = AnalyzeResponse(
         stack_summary=result.get("detected_stack", "Unknown"),
         services=result.get("services", []),
         dockerfiles=result.get("dockerfiles", {}),
@@ -67,6 +71,23 @@ async def analyze_repo(req: AnalyzeRequest):
         confidence=result.get("confidence", 0.0),
         token_usage=TokenUsage(**tracker.get_usage())
     )
+    
+    # Save to Supabase cache
+    from db import supabase
+    commit_sha = result.get("commit_sha", "unknown")
+    if supabase and commit_sha != "unknown":
+        try:
+            result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+            supabase.table("analysis_cache").insert({
+                "repo_url": req.repo_url,
+                "commit_sha": commit_sha,
+                "result": result_dict
+            }).execute()
+            print(f"Cached new analysis for {req.repo_url} at {commit_sha}")
+        except Exception as e:
+            print(f"Failed to cache result in Supabase: {e}")
+
+    return response
 
 if __name__ == "__main__":
     import uvicorn

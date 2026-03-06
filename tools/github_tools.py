@@ -25,6 +25,12 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
         headers=headers,
     ).json()
 
+    ref_data = requests.get(
+        f"https://api.github.com/repos/{repo}/git/ref/heads/{meta['default_branch']}",
+        headers=headers,
+    ).json()
+    commit_sha = ref_data.get("object", {}).get("sha", "unknown")
+
     all_items = tree.get("tree", [])
 
     # Validate package_path exists if not root
@@ -72,6 +78,7 @@ def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[i
     result = {
         "repo_full_name": meta["full_name"],
         "default_branch": meta["default_branch"],
+        "commit_sha": commit_sha,
         "language": meta.get("language"),
         "key_files": key_files,
         "dirs": [i["path"] for i in all_items if i["type"] == "tree"][:20],

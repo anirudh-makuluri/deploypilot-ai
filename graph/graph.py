@@ -24,8 +24,10 @@ workflow.add_node("verifier", verifier_node)
 # ─── Conditional Edges ──────────────────────────────────────────────────────────
 
 def check_scanner_error(state: Dict[str, Any]) -> str:
-    """Route to END if scanner found an error (e.g., invalid package_path)."""
-    return "error" if state.get("error") else "continue"
+    """Route to END if scanner found an error or if cached_response is present."""
+    if state.get("error") or state.get("cached_response"):
+        return "error_or_cached"
+    return "continue"
 
 def check_planner_error(state: Dict[str, Any]) -> str:
     """Route to END if planner found the repo is not deployable."""
@@ -35,12 +37,12 @@ def check_planner_error(state: Dict[str, Any]) -> str:
 # Entry point
 workflow.set_entry_point("scanner")
 
-# Scanner -> Planner (or END on error)
+# Scanner -> Planner (or END on error/cache)
 workflow.add_conditional_edges(
     "scanner",
     check_scanner_error,
     {
-        "error": END,
+        "error_or_cached": END,
         "continue": "planner",
     },
 )
