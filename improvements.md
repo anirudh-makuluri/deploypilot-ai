@@ -1,4 +1,4 @@
-# DeployPilot-AI — Planned Improvements
+# sd-artifacts — Planned Improvements
 
 ## 1. Streaming Responses (SSE)
 - Replace single POST response with Server-Sent Events

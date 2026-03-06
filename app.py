@@ -6,7 +6,7 @@ from graph.nodes.llm_config import TokenTracker
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-app = FastAPI(title="DeployPilot-AI Repo Analyzer")
+app = FastAPI(title="sd-artifacts Repo Analyzer")
 
 app.add_middleware(
     CORSMiddleware,

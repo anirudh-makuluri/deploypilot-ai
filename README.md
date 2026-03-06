@@ -1,6 +1,6 @@
-# DeployPilot-AI Repo Analyzer
+# sd-artifacts Repo Analyzer
 
-DeployPilot-AI Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude 3 Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
+sd-artifacts Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude 3 Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
 
 ## Features
 
@@ -34,8 +34,8 @@ graph TD
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/anirudh-makuluri/deploypilot-ai
-   cd deploypilot-ai
+   git clone https://github.com/anirudh-makuluri/sd-artifacts
+   cd sd-artifacts
    ```
 
 2. **Set up a virtual environment and install dependencies:**

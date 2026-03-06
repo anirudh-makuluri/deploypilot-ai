@@ -1,16 +1,16 @@
-# DeployPilot-AI: Repo Analyzer for SmartDeploy 🚀
+# sd-artifacts: Repo Analyzer for SmartDeploy 🚀
 
 ## Overview
 
-**DeployPilot-AI** is a **LangGraph-powered analyzer service** that inspects GitHub repositories and generates production-ready **Dockerfiles**, **docker-compose.yml**, and **nginx.conf** configurations for deployment to SmartDeploy.
+**sd-artifacts** is a **LangGraph-powered analyzer service** that inspects GitHub repositories and generates production-ready **Dockerfiles**, **docker-compose.yml**, and **nginx.conf** configurations for deployment to SmartDeploy.
 
 **Status**: MVP (v1) → Neo4j caching (v2)
 
 ```
-SmartDeploy Frontend → POST /analyze → DeployPilot-AI → Dockerfile + Compose + Nginx
+SmartDeploy Frontend → POST /analyze → sd-artifacts → Dockerfile + Compose + Nginx
 ```
 
-**Live Demo**: [deploypilot-ai.anirudh-makuluri.xyz/analyze](https://deploypilot-ai.anirudh-makuluri.xyz/analyze)
+**Live Demo**: [sd-artifacts.anirudh-makuluri.xyz/analyze](https://sd-artifacts.anirudh-makuluri.xyz/analyze)
 
 ***
 
