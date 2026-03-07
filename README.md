@@ -73,28 +73,28 @@ graph TD
    ```
 
 2. **Analyze a Repository (Standard):**
-   Send a `POST` request to the `/analyze` endpoint:
+  Send a `POST` request to the `/analyze` endpoint.
+  `github_token` is optional for public repositories and required for private repositories:
    
    ```bash
    curl -X POST http://localhost:8080/analyze \
         -H "Content-Type: application/json" \
         -d '{
               "repo_url": "https://github.com/user/repo-name",
-              "github_token": "your_github_personal_access_token",
               "max_files": 50
             }'
    ```
 
 3. **Analyze a Repository (Streaming):**
-   For real-time progress, send a `POST` request to the `/analyze/stream` endpoint. It returns Server-Sent Events (SSE):
+  For real-time progress, send a `POST` request to the `/analyze/stream` endpoint. It returns Server-Sent Events (SSE).
+  `github_token` is optional for public repositories and required for private repositories:
    
    ```bash
    # Use -N to keep the curl stream open
    curl -N -X POST http://localhost:8080/analyze/stream \
         -H "Content-Type: application/json" \
         -d '{
-              "repo_url": "https://github.com/user/repo-name",
-              "github_token": "your_github_personal_access_token"
+            "repo_url": "https://github.com/user/repo-name"
             }'
    ```
    **Output Format:**

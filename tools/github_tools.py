@@ -5,30 +5,41 @@ import requests
 
 class RepoScanInput(BaseModel):
     repo_url: str = Field(..., description="Full GitHub repo URL")
-    github_token: str = Field(..., description="User's GitHub token")
+    github_token: Optional[str] = Field(None, description="Optional GitHub token (required for private repos)")
     max_files: Optional[int] = Field(20, description="Max files to analyze")
     package_path: str = Field(".", description="Sub-package path to analyze, '.' for entire repo")
 
 @tool(args_schema=RepoScanInput)
-def fetch_repo_structure(repo_url: str, github_token: str, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
+def fetch_repo_structure(repo_url: str, github_token: Optional[str] = None, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
     """Fetch repo metadata, file tree, and key file contents for deploy analysis."""
     repo = repo_url.split("github.com/")[1].rstrip("/")
 
-    headers = {"Authorization": f"token {github_token}"}
+    headers = {"Authorization": f"token {github_token}"} if github_token else {}
 
-    meta = requests.get(f"https://api.github.com/repos/{repo}", headers=headers).json()
-    if "message" in meta and meta["message"] == "Not Found":
-         return {"error": "Repository not found or token invalid"}
+    meta_resp = requests.get(f"https://api.github.com/repos/{repo}", headers=headers)
+    meta = meta_resp.json()
+    if meta_resp.status_code == 404:
+        if github_token:
+            return {"error": "Repository not found or token lacks access"}
+        return {"error": "Repository not found, or it is private and requires a GitHub token"}
+    if meta_resp.status_code in (401, 403):
+        return {"error": "GitHub API authentication failed or rate limit exceeded"}
+    if "default_branch" not in meta:
+        return {"error": f"Failed to fetch repository metadata: {meta.get('message', 'Unknown error')}"}
 
-    tree = requests.get(
+    tree_resp = requests.get(
         f"https://api.github.com/repos/{repo}/git/trees/{meta['default_branch']}?recursive=1",
         headers=headers,
-    ).json()
+    )
+    tree = tree_resp.json()
+    if tree_resp.status_code in (401, 403):
+        return {"error": "Unable to fetch repository tree due to authentication/rate-limit restrictions"}
 
-    ref_data = requests.get(
+    ref_resp = requests.get(
         f"https://api.github.com/repos/{repo}/git/ref/heads/{meta['default_branch']}",
         headers=headers,
-    ).json()
+    )
+    ref_data = ref_resp.json()
     commit_sha = ref_data.get("object", {}).get("sha", "unknown")
 
     all_items = tree.get("tree", [])

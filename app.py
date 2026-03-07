@@ -20,7 +20,7 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     repo_url: str
-    github_token: str
+    github_token: Optional[str] = None
     max_files: Optional[int] = 50
     package_path: str = "."
 
