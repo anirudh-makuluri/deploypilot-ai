@@ -19,6 +19,74 @@ class PlannerOutput(BaseModel):
     has_existing_compose: bool = Field(description="Whether the repo already contains a docker-compose.yml")
 
 
+def _normalize_ctx(path: str) -> str:
+    """Normalize build context paths for reliable comparisons."""
+    if not path:
+        return "."
+    normalized = path.replace("\\", "/").strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "."
+
+
+def _is_mobile_service(service: ServiceInfo, scan: Dict[str, Any]) -> bool:
+    """Return True when a service appears to be mobile-only (React Native/Expo/Flutter/iOS/Android)."""
+    name = (service.name or "").lower()
+    ctx = _normalize_ctx(service.build_context).lower()
+
+    mobile_markers = {
+        "mobile",
+        "android",
+        "ios",
+        "react-native",
+        "reactnative",
+        "expo",
+        "flutter",
+    }
+
+    ctx_tokens = set(filter(None, ctx.split("/")))
+    if any(marker in name for marker in mobile_markers):
+        return True
+    if any(marker in ctx_tokens for marker in mobile_markers):
+        return True
+
+    key_files = scan.get("key_files", {})
+    dirs = [d.replace("\\", "/").lower() for d in scan.get("dirs", [])]
+
+    # Use the package.json that belongs to this build context when available.
+    candidate_package_paths = []
+    if ctx == ".":
+        candidate_package_paths.append("package.json")
+    else:
+        candidate_package_paths.append(f"{ctx}/package.json")
+
+    package_content = ""
+    for pkg_path in candidate_package_paths:
+        if pkg_path in key_files:
+            package_content = key_files[pkg_path].lower()
+            break
+
+    package_mobile_markers = [
+        '"react-native"',
+        '"expo"',
+        '"@react-native',
+        '"metro"',
+        '"detox"',
+        '"eas-cli"',
+    ]
+    if package_content and any(marker in package_content for marker in package_mobile_markers):
+        return True
+
+    # Additional path-level signal for native mobile projects.
+    if ctx != ".":
+        android_dir = f"{ctx}/android"
+        ios_dir = f"{ctx}/ios"
+        if android_dir in dirs or ios_dir in dirs:
+            return True
+
+    return False
+
+
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Infer stack, services, and deployability from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
@@ -36,7 +104,8 @@ Tasks:
    - If NOT deployable, set is_deployable=false and provide the reason.
 
 2. If deployable, analyze the repo structure:
-   - Identify ALL services that need to be built (e.g., a monorepo might have a frontend and a websocket server in separate directories)
+    - Identify ONLY web-deployable services that need to be built (e.g., a monorepo might have a frontend and a websocket server in separate directories)
+    - EXCLUDE mobile app packages from services even if they exist in the same monorepo (React Native/Expo/Flutter/iOS/Android apps should never get Dockerfiles here)
    - For each service, determine its name, build context directory, and port
    - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
    - Check if the repo already has a docker-compose.yml/yaml in key_files
@@ -81,9 +150,14 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         if not data.is_deployable:
             state["error"] = data.error_reason or "This repository is not deployable as a web service"
             return state
+
+        filtered_services = [s for s in data.services if not _is_mobile_service(s, scan)]
+        if not filtered_services:
+            state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
+            return state
         
         state["detected_stack"] = data.detected_stack
-        state["services"] = [s.model_dump() for s in data.services]
+        state["services"] = [s.model_dump() for s in filtered_services]
         state["has_existing_dockerfiles"] = data.has_existing_dockerfiles
         state["has_existing_compose"] = data.has_existing_compose
     except Exception as e:

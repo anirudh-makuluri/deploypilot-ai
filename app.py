@@ -83,6 +83,8 @@ async def analyze_repo(req: AnalyzeRequest):
         for attempt in range(3):
             try:
                 result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+                # Internal cache metadata used to support package-scoped cache reuse.
+                result_dict["_cache_package_path"] = req.package_path
                 supabase.table("analysis_cache").insert({
                     "repo_url": req.repo_url,
                     "commit_sha": commit_sha,
@@ -158,6 +160,8 @@ async def analyze_repo_stream(req: AnalyzeRequest):
                 for attempt in range(3):
                     try:
                         result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+                        # Internal cache metadata used to support package-scoped cache reuse.
+                        result_dict["_cache_package_path"] = req.package_path
                         supabase.table("analysis_cache").insert({
                             "repo_url": req.repo_url,
                             "commit_sha": commit_sha,
