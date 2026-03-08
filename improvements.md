@@ -27,8 +27,7 @@
 
 ## [x] 6. Caching & Rate Limiting
 - Cache repo scans by `repo_url + commit_sha` to avoid redundant GitHub API calls
-- Use in-memory cache (TTL-based) or Redis for persistence
-- Add rate limiting per API key / IP to prevent abuse
+- Use supabase db for storing responses
 - Return cached results instantly when available
 
 ## 7. Deployment README Generation
@@ -83,3 +82,51 @@
   - `% runs with confidence >= 0.85`
   - `% runs with compose valid + port consistency pass`
   - Median manual fix minutes
+
+## 12. Feedback Loop for Failed or Low-Quality Output
+- Add a feedback endpoint so users can submit free-text feedback when generated deployment artifacts do not work.
+- Example feedback payload:
+  - `run_id`: ties feedback to a specific generation run
+  - `feedback_text`: e.g., "deployment is not working on Cloud Run"
+  - `severity`: `blocking | degraded | minor`
+  - `artifact_scope`: `dockerfile | compose | nginx | cicd | env | unknown`
+  - `optional_metadata`: logs, failing command, platform (`ecs`, `cloud_run`, `k8s`), runtime error snippets
+
+- Add a Supabase table `analysis_feedback` (expand the optional table from item 11):
+  - `id`, `created_at`, `run_id`, `user_id` (optional)
+  - `feedback_text`, `severity`, `artifact_scope`
+  - `resolved` (bool), `resolution_note`
+  - `workflow_version`, `retry_attempt`
+
+- Add a `feedback_interpreter_node` before regeneration:
+  - Classify feedback into actionable categories:
+    - `build_failure`
+    - `runtime_crash`
+    - `healthcheck_failure`
+    - `port_mismatch`
+    - `missing_env_var`
+    - `reverse_proxy_misconfig`
+    - `cicd_failure`
+  - Extract constraints from text/log snippets and create a `repair_plan` object.
+
+- Add a `targeted_regeneration` flow instead of full rerun by default:
+  - If `port_mismatch`, rerun `compose_generator` + `nginx_generator` + `verifier`
+  - If `missing_env_var`, rerun `env_extractor` + `compose_generator` + `verifier`
+  - If `build_failure`, rerun only `dockerfile_generator` + `verifier`
+  - Fall back to full pipeline if confidence in classification is low
+
+- Prompt adaptation:
+  - Inject `feedback_summary` and `repair_plan` into generation prompts
+  - Add explicit "previous output failed because ..." constraints
+  - Require generators to explain what changed to address feedback
+
+- Add "delta output" in API response:
+  - `changes_made`: list of concrete fixes applied
+  - `feedback_addressed`: bool
+  - `remaining_risks`: any unresolved items
+  - `suggested_next_debug_step`: if still failing
+
+- Learning loop:
+  - Persist `(feedback_category, stack_tags, successful_fix_pattern)` into `example_bank` metadata or a new `repair_patterns` table
+  - During future runs, retrieve prior successful repair patterns for similar stacks/issues
+  - Track KPI: `% feedback tickets resolved in first retry`
