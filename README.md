@@ -158,6 +158,7 @@ graph TD
    **Example Response:**
    ```json
    {
+     "commit_sha": "abc123def4567890",
      "stack_summary": "Next.js React app with WebSocket server",
      "services": [
        {
@@ -224,6 +225,17 @@ graph TD
               "detected_stack": "Next.js app with Node backend",
               "service": {"name": "web", "build_context": "."},
               "limit": 3
+            }'
+   ```
+
+7. **Delete Cached Analysis Result:**
+   Delete cached entries for a repository. Provide `commit_sha` to delete one specific cached result, or omit it to delete all cache rows for the repository.
+   ```bash
+   curl -X DELETE http://localhost:8080/cache \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "commit_sha": "abc123def456"
             }'
    ```
 

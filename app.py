@@ -35,6 +35,7 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
 
 class AnalyzeResponse(BaseModel):
+    commit_sha: str = "unknown"
     stack_summary: str
     services: List[Dict]
     dockerfiles: Dict[str, str]
@@ -72,6 +73,17 @@ class PreviewExamplesRequest(BaseModel):
 class PreviewExamplesResponse(BaseModel):
     examples: List[Dict]
 
+
+class DeleteCacheRequest(BaseModel):
+    repo_url: str
+    commit_sha: Optional[str] = None
+
+
+class DeleteCacheResponse(BaseModel):
+    deleted: int
+    repo_url: str
+    commit_sha: Optional[str] = None
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest):
     tracker = TokenTracker()
@@ -90,9 +102,14 @@ async def analyze_repo(req: AnalyzeRequest):
         
     if "cached_response" in result:
         print(f"Returning cached analysis for {req.repo_url}")
-        return AnalyzeResponse(**result["cached_response"])
+        cached_payload = dict(result["cached_response"])
+        cached_payload.setdefault("commit_sha", result.get("commit_sha", "unknown"))
+        return AnalyzeResponse(**cached_payload)
     
+    commit_sha = result.get("commit_sha", "unknown")
+
     response = AnalyzeResponse(
+        commit_sha=commit_sha,
         stack_summary=result.get("detected_stack", "Unknown"),
         services=result.get("services", []),
         dockerfiles=result.get("dockerfiles", {}),
@@ -108,7 +125,6 @@ async def analyze_repo(req: AnalyzeRequest):
     
     # Save to Supabase cache
     from db import supabase
-    commit_sha = result.get("commit_sha", "unknown")
     if supabase and commit_sha != "unknown":
         for attempt in range(3):
             try:
@@ -166,6 +182,39 @@ async def preview_example_bank_matches(req: PreviewExamplesRequest):
     )
     return PreviewExamplesResponse(examples=examples)
 
+
+@app.delete("/cache", response_model=DeleteCacheResponse)
+async def delete_cached_analysis(req: DeleteCacheRequest):
+    from db import supabase
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    try:
+        query = supabase.table("analysis_cache").select("id").eq("repo_url", req.repo_url)
+        if req.commit_sha:
+            query = query.eq("commit_sha", req.commit_sha)
+
+        existing = query.execute()
+        rows = existing.data or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="No cached result found for the provided criteria")
+
+        delete_query = supabase.table("analysis_cache").delete().eq("repo_url", req.repo_url)
+        if req.commit_sha:
+            delete_query = delete_query.eq("commit_sha", req.commit_sha)
+        delete_query.execute()
+
+        return DeleteCacheResponse(
+            deleted=len(rows),
+            repo_url=req.repo_url,
+            commit_sha=req.commit_sha,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete cache: {e}")
+
 @app.post("/analyze/stream")
 async def analyze_repo_stream(req: AnalyzeRequest):
     async def event_generator():
@@ -200,12 +249,14 @@ async def analyze_repo_stream(req: AnalyzeRequest):
                         # Inject current token usage into the cached response before returning
                         if "token_usage" not in cached:
                             cached["token_usage"] = TokenUsage(**tracker.get_usage()).dict()
+                        cached.setdefault("commit_sha", state_update.get("commit_sha", full_state.get("commit_sha", "unknown")))
                             
                         # Ensure fields conform
                         yield f"event: complete\ndata: {json.dumps(cached)}\n\n"
                         return
             
             response = AnalyzeResponse(
+                commit_sha=full_state.get("commit_sha", "unknown"),
                 stack_summary=full_state.get("detected_stack", "Unknown"),
                 services=full_state.get("services", []),
                 dockerfiles=full_state.get("dockerfiles", {}),
