@@ -25,7 +25,9 @@ class FakeTableQuery:
         self.table_name = table_name
         self.operation = None
         self.insert_payload = None
+        self.upsert_payload = None
         self.filters = {}
+        self.expect_single = False
 
     def select(self, _columns):
         self.operation = "select"
@@ -38,6 +40,16 @@ class FakeTableQuery:
     def insert(self, payload):
         self.operation = "insert"
         self.insert_payload = payload
+        return self
+
+    def upsert(self, payload, on_conflict=None):
+        self.operation = "upsert"
+        self.upsert_payload = payload
+        self.upsert_on_conflict = on_conflict
+        return self
+
+    def single(self):
+        self.expect_single = True
         return self
 
     def eq(self, key, value):
@@ -65,8 +77,35 @@ class FakeTableQuery:
                 )
             return FakeExecuteResponse([self.insert_payload])
 
+        if self.operation == "upsert":
+            self.supabase.upserted_payloads.append(self.upsert_payload)
+            if self.table_name == "analysis_cache":
+                matched = False
+                for row in self.supabase.cache_rows:
+                    if (
+                        row.get("repo_url") == self.upsert_payload.get("repo_url")
+                        and row.get("commit_sha") == self.upsert_payload.get("commit_sha")
+                    ):
+                        row["result"] = self.upsert_payload.get("result")
+                        matched = True
+                        break
+                if not matched:
+                    self.supabase.cache_rows.append(
+                        {
+                            "id": f"id-{len(self.supabase.cache_rows) + 1}",
+                            "repo_url": self.upsert_payload.get("repo_url"),
+                            "commit_sha": self.upsert_payload.get("commit_sha"),
+                            "result": self.upsert_payload.get("result"),
+                        }
+                    )
+            return FakeExecuteResponse([self.upsert_payload])
+
         if self.operation == "select":
             rows = [row for row in self.supabase.cache_rows if self._matches(row)]
+            if self.expect_single:
+                if len(rows) != 1:
+                    raise RuntimeError("single row not found")
+                return FakeExecuteResponse(rows[0])
             return FakeExecuteResponse(rows)
 
         if self.operation == "delete":
@@ -90,6 +129,7 @@ class FakeSupabase:
         self.fail_on_execute = fail_on_execute
         self.insert_attempts = 0
         self.inserted_payloads = []
+        self.upserted_payloads = []
 
     def table(self, table_name):
         return FakeTableQuery(self, table_name)
@@ -482,3 +522,91 @@ def test_analyze_stream_emits_error_for_top_level_exception(monkeypatch):
     assert len(events) == 1
     assert events[0][0] == "error"
     assert "boom" in events[0][1]["detail"]
+
+
+def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
+    _set_common_mocks(monkeypatch)
+    fake_supabase = FakeSupabase(
+        cache_rows=[
+            {
+                "id": "1",
+                "repo_url": "https://github.com/acme/repo",
+                "commit_sha": "sha-1",
+                "result": {
+                    "commit_sha": "sha-1",
+                    "stack_summary": "FastAPI",
+                    "services": [{"name": "api", "build_context": ".", "port": 8000}],
+                    "dockerfiles": {"api": "FROM python:3.11"},
+                    "docker_compose": "services:\n  api:\n    build: .\n",
+                    "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
+                    "has_existing_dockerfiles": False,
+                    "has_existing_compose": False,
+                    "risks": ["old-risk"],
+                    "confidence": 0.5,
+                    "hadolint_results": {"api": "old"},
+                    "_cache_package_path": ".",
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(db_module, "supabase", fake_supabase)
+
+    async def fake_feedback_astream(_initial_state, config=None):
+        callbacks = config.get("callbacks", []) if config else []
+        assert len(callbacks) == 1
+        yield {"feedback_coordinator": {"change_plan": []}}
+        yield {
+            "feedback_verifier": {
+                "commit_sha": "sha-1",
+                "detected_stack": "FastAPI",
+                "services": [{"name": "api", "build_context": ".", "port": 8000}],
+                "dockerfiles": {"api": "FROM python:3.12"},
+                "docker_compose": "services:\n  api:\n    build: .\n",
+                "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
+                "has_existing_dockerfiles": False,
+                "has_existing_compose": False,
+                "risks": ["new-risk"],
+                "confidence": 0.91,
+                "hadolint_results": {"api": ""},
+            }
+        }
+
+    monkeypatch.setattr("graph.feedback.feedback_graph.astream", fake_feedback_astream)
+
+    response = _client().post(
+        "/feedback/stream",
+        json={
+            "repo_url": "https://github.com/acme/repo",
+            "commit_sha": "sha-1",
+            "feedback": "fix api healthcheck",
+        },
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert events[0][0] == "progress"
+    assert events[-1][0] == "complete"
+    assert events[-1][1]["commit_sha"] == "sha-1"
+    assert events[-1][1]["confidence"] == 0.91
+    assert events[-1][1]["token_usage"]["total_tokens"] == 18
+    assert len(fake_supabase.upserted_payloads) == 1
+
+
+def test_feedback_stream_emits_error_when_cache_missing(monkeypatch):
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", FakeSupabase(cache_rows=[]))
+
+    response = _client().post(
+        "/feedback/stream",
+        json={
+            "repo_url": "https://github.com/acme/repo",
+            "commit_sha": "missing",
+            "feedback": "fix api",
+        },
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert "No cached analysis found" in events[0][1]["detail"]

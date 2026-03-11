@@ -361,9 +361,8 @@ feedback_workflow.add_edge("feedback_verifier", END)
 feedback_graph = feedback_workflow.compile()
 
 
-def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Dict[str, Any]:
-    """Run multi-agent feedback remediation and return AnalyzeResponse-shaped data."""
-    initial_state = {
+def build_feedback_initial_state(cached_result: Dict[str, Any], feedback: str) -> Dict[str, Any]:
+    return {
         "feedback": feedback,
         "cached_result": cached_result,
         "commit_sha": cached_result.get("commit_sha", "unknown"),
@@ -378,8 +377,7 @@ def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Di
         "prior_hadolint_results": dict(cached_result.get("hadolint_results", {})),
     }
 
-    result = feedback_graph.invoke(initial_state)
-
+def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "commit_sha": result.get("commit_sha", "unknown"),
         "stack_summary": result.get("detected_stack", "unknown"),
@@ -393,3 +391,10 @@ def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Di
         "confidence": result.get("confidence", 0.5),
         "hadolint_results": result.get("hadolint_results", {}),
     }
+
+
+def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Dict[str, Any]:
+    """Run multi-agent feedback remediation and return AnalyzeResponse-shaped data."""
+    initial_state = build_feedback_initial_state(cached_result, feedback)
+    result = feedback_graph.invoke(initial_state)
+    return format_feedback_result(result)

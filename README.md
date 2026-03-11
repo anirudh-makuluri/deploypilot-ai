@@ -274,6 +274,32 @@ graph TD
    - The response shape is the same as `/analyze` (updated artifacts, risks, confidence, hadolint results).
    - The improved result is upserted back into cache for that same `repo_url + commit_sha`.
 
+9. **Improve Existing Results Using Feedback (Streaming):**
+   For real-time feedback remediation progress, call `/feedback/stream`.
+
+   ```bash
+   # Use -N to keep the curl stream open
+   curl -N -X POST http://localhost:8080/feedback/stream \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "commit_sha": "abc123def456",
+              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
+            }'
+   ```
+
+   **Output Format:**
+   ```text
+   event: progress
+   data: {"node": "feedback_coordinator", "status": "completed"}
+
+   event: progress
+   data: {"node": "dockerfile_improver", "status": "completed"}
+   ...
+   event: complete
+   data: { ... full JSON response ... }
+   ```
+
 ## Tech Stack
 
 - **FastAPI** & **Uvicorn**: High-performance REST API.
