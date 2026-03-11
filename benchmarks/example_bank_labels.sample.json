@@ -1,0 +1,120 @@
+{
+  "repos": [
+    {
+      "repo_url": "https://github.com/tiangolo/full-stack-fastapi-template",
+      "repo": "tiangolo/full-stack-fastapi-template",
+      "package_path": "backend",
+      "required_stack_tokens": [
+        "python",
+        "fastapi",
+        "uvicorn"
+      ],
+      "expected_services": [
+        {
+          "name": "api",
+          "build_context": "backend"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+		"api": 8000
+	  }
+    },
+    {
+      "repo_url": "https://github.com/tiangolo/full-stack-fastapi-template",
+      "repo": "tiangolo/full-stack-fastapi-template",
+      "package_path": "frontend",
+      "required_stack_tokens": [
+        "nginx",
+		"vite"
+      ],
+      "expected_services": [
+        {
+          "name": "web",
+          "build_context": "frontend"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+		"web": 5173
+	  }
+    },
+    {
+      "repo_url": "https://github.com/vercel/next.js",
+      "repo": "vercel/next.js",
+      "package_path": "examples/with-docker",
+      "required_stack_tokens": [
+        "next",
+        "node"
+      ],
+      "expected_services": [
+        {
+          "name": "web",          
+		  "build_context": "examples/with-docker"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+        "web": 3000
+      }
+    },
+    {
+	  "repo_url": "https://github.com/vercel/next.js",
+      "repo": "vercel/next.js",
+      "package_path": "examples/with-docker-compose",
+      "required_stack_tokens": [
+        "next",
+        "node"
+      ],
+      "expected_services": [
+        {
+          "name": "web",
+          "build_context": "examples/with-docker-compose/next-app"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+		"web": 3000
+	  }
+    },
+    {
+      "repo_url": "https://github.com/vercel/next.js",
+      "repo": "vercel/next.js",
+      "package_path": "examples/with-docker-export-output",
+      "required_stack_tokens": [
+        "next",
+        "node",
+        "nginx"
+      ],
+      "expected_services": [
+        {
+          "name": "web",
+          "build_context": "examples/with-docker-export-output"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+        "web": 8080
+      }
+    },
+    {
+      "repo_url": "https://github.com/vercel/next.js",
+      "repo": "vercel/next.js",
+      "package_path": "examples/with-docker-multi-env",
+      "required_stack_tokens": [
+        "next",
+        "node"
+      ],
+      "expected_services": [
+        {
+          "name": "web",
+          "build_context": "examples/with-docker-multi-env"
+        }
+      ],
+      "excluded_services": [],
+      "expected_ports": {
+        "web": 3000
+      }
+    }
+  ]
+}

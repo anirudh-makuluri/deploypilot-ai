@@ -1,6 +1,6 @@
 # SD-Artifacts Repo Analyzer
 
-SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude 3 Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
+SD-Artifacts Repo Analyzer is an intelligent deployment companion that scans GitHub repositories and automatically prepares them for production deployment. Using a LangGraph-based workflow powered by Amazon Bedrock (Claude Haiku), it analyzes the repository structure, detects the tech stack, infers required external services, and generates optimized, production-ready infrastructure files (Dockerfile, docker-compose.yml, nginx.conf).
 
 ## Features
 
@@ -114,7 +114,7 @@ graph TD
    - **Windows:** `scoop install hadolint`
    - Or download from [their releases page](https://github.com/hadolint/hadolint/releases).
 
-3. **Configure Environment Variables:**
+4. **Configure Environment Variables:**
    Create a `.env` file in the root directory and add the following:
    ```env
    # Ensure you have your AWS access credentials configured for Amazon Bedrock
@@ -122,12 +122,12 @@ graph TD
    AWS_SECRET_ACCESS_KEY=your_aws_secret_key
    AWS_DEFAULT_REGION=your_aws_region
    BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
-  SUPABASE_URL=your_supabase_project_url
-  SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-   PORT=8080
+    SUPABASE_URL=your_supabase_project_url
+    SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+    PORT=8080
    ```
 
-4. **Initialize Supabase Tables:**
+5. **Initialize Supabase Tables:**
   Run `supabase_schema.sql` in your Supabase SQL editor to create:
   - `analysis_cache`
   - `example_bank` (for Dockerfile/compose reference examples)
@@ -272,6 +272,82 @@ graph TD
 8. **Improve Existing Results Using Feedback:**
    Use this when an analyzed repo has deployment issues and you want targeted iteration over existing generated artifacts.
 
+   ```bash
+   curl -X POST http://localhost:8080/feedback \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "commit_sha": "abc123def456",
+              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
+            }'
+   ```
+
+   Notes:
+   - `repo_url + commit_sha` must already exist in `analysis_cache`.
+   - The response shape is the same as `/analyze` (updated artifacts, risks, confidence, hadolint results).
+   - The improved result is upserted back into cache for that same `repo_url + commit_sha`.
+
+9. **Improve Existing Results Using Feedback (Streaming):**
+   For real-time feedback remediation progress, call `/feedback/stream`.
+
+   ```bash
+   # Use -N to keep the curl stream open
+   curl -N -X POST http://localhost:8080/feedback/stream \
+        -H "Content-Type: application/json" \
+        -d '{
+              "repo_url": "https://github.com/user/repo-name",
+              "commit_sha": "abc123def456",
+              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
+            }'
+   ```
+
+   **Output Format:**
+   ```text
+   event: progress
+   data: {"node": "feedback_coordinator", "status": "completed"}
+
+   event: progress
+   data: {"node": "dockerfile_improver", "status": "completed"}
+   ...
+   event: complete
+   data: { ... full JSON response ... }
+   ```
+
+## Testing
+
+The project includes automated tests for API behavior, retry reliability, feedback remediation flow, and scan quality tooling.
+
+### Run tests
+
+Install pytest if it is not already available in your environment:
+
+```bash
+pip install pytest
+```
+
+Run the full test suite:
+
+```bash
+python -m pytest tests -q
+```
+
+Run a specific test module:
+
+```bash
+python -m pytest tests/test_app_endpoints.py -q
+```
+
+### Current coverage
+
+- `tests/test_app_endpoints.py`: API endpoint behavior and response contracts.
+- `tests/test_feedback_workflow.py`: feedback coordinator and remediation workflow behavior.
+- `tests/test_llm_retry.py`: retry wrapper behavior, backoff, and retry exhaustion paths.
+- `tests/test_node_retry_integration.py`: node-level retry integration across graph execution.
+- `tests/test_port_and_stack_extractor.py`: stack token and port extraction logic.
+- `tests/test_eval_metrics.py`: scan quality metric calculations.
+- `tests/test_evaluate_scan_quality.py`: end-to-end benchmark evaluation script behavior.
+- `tests/test_github_tools.py`: GitHub utility layer behavior used during scanning.
+
 ## Scan Quality Benchmarking (Objective Metrics)
 
 You can benchmark scanner/planner accuracy using a lightweight labels file as the source of truth.
@@ -321,47 +397,6 @@ Behavior:
 - `mobile_leakage_rate <= 0.02`
 - `stack_accuracy >= 0.90` (for labeled repos)
 - `port_accuracy_known >= 0.90`
-
-   ```bash
-   curl -X POST http://localhost:8080/feedback \
-        -H "Content-Type: application/json" \
-        -d '{
-              "repo_url": "https://github.com/user/repo-name",
-              "commit_sha": "abc123def456",
-              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
-            }'
-   ```
-
-   Notes:
-   - `repo_url + commit_sha` must already exist in `analysis_cache`.
-   - The response shape is the same as `/analyze` (updated artifacts, risks, confidence, hadolint results).
-   - The improved result is upserted back into cache for that same `repo_url + commit_sha`.
-
-9. **Improve Existing Results Using Feedback (Streaming):**
-   For real-time feedback remediation progress, call `/feedback/stream`.
-
-   ```bash
-   # Use -N to keep the curl stream open
-   curl -N -X POST http://localhost:8080/feedback/stream \
-        -H "Content-Type: application/json" \
-        -d '{
-              "repo_url": "https://github.com/user/repo-name",
-              "commit_sha": "abc123def456",
-              "feedback": "The API container fails health checks and nginx is not routing /api correctly"
-            }'
-   ```
-
-   **Output Format:**
-   ```text
-   event: progress
-   data: {"node": "feedback_coordinator", "status": "completed"}
-
-   event: progress
-   data: {"node": "dockerfile_improver", "status": "completed"}
-   ...
-   event: complete
-   data: { ... full JSON response ... }
-   ```
 
 ## Tech Stack
 

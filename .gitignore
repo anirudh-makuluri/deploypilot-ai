@@ -208,3 +208,4 @@ __marimo__/
 
 
 *.json
+!benchmarks/example_bank_labels.sample.json
