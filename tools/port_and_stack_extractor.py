@@ -161,11 +161,17 @@ def _extract_ports_from_package_json(repo_dir: str, build_context: str = ".") ->
     try:
         data = json.loads(package_json.read_text(encoding="utf-8"))
         scripts = data.get("scripts", {})
-        
-        # Check start script for port
-        start_script = scripts.get("start", "")
-        if start_script:
-            # Look for -p, --port, listen, PORT patterns
+
+        # Check common runtime scripts for explicit ports.
+        candidate_scripts = [
+            scripts.get("start", ""),
+            scripts.get("dev", ""),
+            scripts.get("serve", ""),
+            scripts.get("preview", ""),
+        ]
+        for script in candidate_scripts:
+            if not script:
+                continue
             port_patterns = [
                 r"-p\s+(\d+)",
                 r"--port[=\s]+(\d+)",
@@ -174,15 +180,19 @@ def _extract_ports_from_package_json(repo_dir: str, build_context: str = ".") ->
                 r"listen['\"]?\s*:\s*(\d+)",
             ]
             for pattern in port_patterns:
-                match = re.search(pattern, start_script)
+                match = re.search(pattern, script)
                 if match:
-                    port = int(match.group(1))
-                    ports.append((port, 0.75))  # Medium-high confidence
-        
-        # Check for PORT env in scripts
-        if "PORT" in start_script or "${PORT}" in start_script:
-            # Port is configurable, will use env/default
-            pass
+                    ports.append((int(match.group(1)), 0.75))
+
+        # Vite commonly runs from `npm run dev` without explicit port flags.
+        deps = {}
+        deps.update(data.get("dependencies", {}))
+        deps.update(data.get("devDependencies", {}))
+        dev_script = str(scripts.get("dev", "")).lower()
+        if "vite" in deps or re.search(r"\bvite\b", dev_script):
+            has_explicit_vite_port = any(port == 5173 for port, _ in ports)
+            if not has_explicit_vite_port:
+                ports.append((5173, 0.68))
     except Exception:
         pass
     
@@ -258,14 +268,17 @@ def _extract_ports_from_config_files(repo_dir: str, build_context: str = ".") ->
     return ports
 
 
-def _extract_stack_tokens(repo_dir: str) -> Set[str]:
-    """Extract stack technology tokens from all accessible files."""
+def _extract_stack_tokens(repo_dir: str, build_context: str = ".") -> Set[str]:
+    """Extract stack technology tokens from the requested build context."""
     tokens: Set[str] = set()
-    
+
     repo_path = Path(repo_dir)
+    context_path = repo_path / (build_context if build_context != "." else "")
+    if not context_path.exists():
+        context_path = repo_path
     
     # Check package.json
-    package_json = repo_path / "package.json"
+    package_json = context_path / "package.json"
     if package_json.exists():
         try:
             data = json.loads(package_json.read_text(encoding="utf-8"))
@@ -287,7 +300,7 @@ def _extract_stack_tokens(repo_dir: str) -> Set[str]:
             pass
     
     # Check requirements.txt
-    requirements = repo_path / "requirements.txt"
+    requirements = context_path / "requirements.txt"
     if requirements.exists():
         try:
             content = requirements.read_text(encoding="utf-8", errors="ignore")
@@ -298,7 +311,7 @@ def _extract_stack_tokens(repo_dir: str) -> Set[str]:
         except Exception:
             pass
 
-    pyproject_toml = repo_path / "pyproject.toml"
+    pyproject_toml = context_path / "pyproject.toml"
     if pyproject_toml.exists():
         try:
             content = pyproject_toml.read_text(encoding="utf-8", errors="ignore").lower()
@@ -309,16 +322,16 @@ def _extract_stack_tokens(repo_dir: str) -> Set[str]:
         except Exception:
             pass
 
-    if (repo_path / "bun.lockb").exists() or (repo_path / "bun.lock").exists():
+    if (context_path / "bun.lockb").exists() or (context_path / "bun.lock").exists():
         tokens.add("bun")
     
     # Check go.mod
-    go_mod = repo_path / "go.mod"
+    go_mod = context_path / "go.mod"
     if go_mod.exists():
         tokens.add("go")
     
     # Check Dockerfile for base image hints
-    for dockerfile in repo_path.glob("Dockerfile*"):
+    for dockerfile in context_path.glob("Dockerfile*"):
         try:
             content = dockerfile.read_text(encoding="utf-8", errors="ignore").lower()
             if "node:" in content:
@@ -339,11 +352,15 @@ def _extract_stack_tokens(repo_dir: str) -> Set[str]:
                 tokens.add("bun")
             if "nginx" in content:
                 tokens.add("nginx")
+            if "uvicorn" in content:
+                tokens.add("uvicorn")
+            if "gunicorn" in content:
+                tokens.add("gunicorn")
         except Exception:
             pass
     
     # Check docker-compose
-    for compose_file in repo_path.glob("docker-compose*.y*ml"):
+    for compose_file in context_path.glob("docker-compose*.y*ml"):
         try:
             import yaml
             content = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -364,8 +381,21 @@ def _extract_stack_tokens(repo_dir: str) -> Set[str]:
                             tokens.add("redis")
                         if "mongo" in image:
                             tokens.add("mongodb")
+
+                        # Parse command hints to infer Python app servers.
+                        command = str(service_config.get("command", "")).lower()
+                        if "uvicorn" in command:
+                            tokens.add("uvicorn")
+                            tokens.add("python")
+                        if "gunicorn" in command:
+                            tokens.add("gunicorn")
+                            tokens.add("python")
         except Exception:
             pass
+
+    # Conservative runtime inference for FastAPI apps when an ASGI server is not explicit.
+    if "fastapi" in tokens and "python" in tokens and "uvicorn" not in tokens and "gunicorn" not in tokens:
+        tokens.add("uvicorn")
     
     return tokens
 
@@ -433,8 +463,8 @@ def extract_port_and_stack(
                     "error": "Failed to clone or download repository",
                 }
             
-            # Extract stack tokens
-            stack_tokens = sorted(_extract_stack_tokens(temp_dir))
+            # Extract stack tokens from the requested build context.
+            stack_tokens = sorted(_extract_stack_tokens(temp_dir, build_context=build_context))
             
             # Extract ports in ranked order of confidence
             all_ports: List[Tuple[int, float, str]] = []

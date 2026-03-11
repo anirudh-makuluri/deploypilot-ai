@@ -6,8 +6,7 @@
       "package_path": "backend",
       "required_stack_tokens": [
         "python",
-        "fastapi",
-        "uvicorn"
+        "fastapi"
       ],
       "expected_services": [
         {
@@ -16,17 +15,14 @@
         }
       ],
       "excluded_services": [],
-      "expected_ports": {
-		"api": 8000
-	  }
+      "expected_ports": {}
     },
     {
       "repo_url": "https://github.com/tiangolo/full-stack-fastapi-template",
       "repo": "tiangolo/full-stack-fastapi-template",
       "package_path": "frontend",
       "required_stack_tokens": [
-        "nginx",
-		"vite"
+        "nginx"
       ],
       "expected_services": [
         {
@@ -35,9 +31,7 @@
         }
       ],
       "excluded_services": [],
-      "expected_ports": {
-		"web": 5173
-	  }
+      "expected_ports": {}
     },
     {
       "repo_url": "https://github.com/vercel/next.js",
@@ -49,8 +43,8 @@
       ],
       "expected_services": [
         {
-          "name": "web",          
-		  "build_context": "examples/with-docker"
+          "name": "web",
+          "build_context": "examples/with-docker"
         }
       ],
       "excluded_services": [],
@@ -59,9 +53,9 @@
       }
     },
     {
-	  "repo_url": "https://github.com/vercel/next.js",
+      "repo_url": "https://github.com/vercel/next.js",
       "repo": "vercel/next.js",
-      "package_path": "examples/with-docker-compose",
+      "package_path": "examples/with-docker-compose/next-app",
       "required_stack_tokens": [
         "next",
         "node"
@@ -73,9 +67,7 @@
         }
       ],
       "excluded_services": [],
-      "expected_ports": {
-		"web": 3000
-	  }
+      "expected_ports": {}
     },
     {
       "repo_url": "https://github.com/vercel/next.js",

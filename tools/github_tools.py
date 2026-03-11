@@ -47,6 +47,59 @@ def _is_relevant_markdown_file(path: str, package_path: str) -> bool:
     parent_path = lower_path.rsplit("/", 1)[0] if "/" in lower_path else "."
     return parent_path == normalized_package_path.lower() and file_name in PACKAGE_MARKDOWN_FILES
 
+def _navigate_to_subtree(repo: str, branch: str, package_path: str, headers: dict):
+    """Walk path components to the target directory and fetch its subtree recursively.
+
+    Uses N non-recursive tree API calls (one per path depth level) to locate the
+    directory SHA, then one recursive fetch of just that subtree.  This avoids the
+    GitHub 100k-entry truncation that happens when doing a full-repo recursive fetch
+    on large monorepos like vercel/next.js.
+
+    Args:
+        package_path: Already-normalized path (forward slashes, no leading/trailing slash).
+
+    Returns:
+        (items, error_message) where items have paths prefixed with package_path.
+        error_message is None on success.
+    """
+    components = [c for c in package_path.split("/") if c]
+    current_ref = branch
+
+    for component in components:
+        level_resp = requests.get(
+            f"https://api.github.com/repos/{repo}/git/trees/{current_ref}",
+            headers=headers,
+        )
+        if level_resp.status_code in (401, 403):
+            return [], "Unable to fetch repository tree due to authentication/rate-limit restrictions"
+        if level_resp.status_code != 200:
+            return [], f"Package path '{package_path}' not found in repository"
+        entries = level_resp.json().get("tree", [])
+        match = next(
+            (e for e in entries if e.get("path") == component and e.get("type") == "tree"),
+            None,
+        )
+        if not match:
+            return [], f"Package path '{package_path}' not found in repository"
+        current_ref = match["sha"]
+
+    subtree_resp = requests.get(
+        f"https://api.github.com/repos/{repo}/git/trees/{current_ref}?recursive=1",
+        headers=headers,
+    )
+    if subtree_resp.status_code in (401, 403):
+        return [], "Unable to fetch repository tree due to authentication/rate-limit restrictions"
+    if subtree_resp.status_code != 200:
+        return [], f"Package path '{package_path}' not found in repository"
+
+    prefix = package_path + "/"
+    items = [
+        {**item, "path": prefix + item["path"]}
+        for item in subtree_resp.json().get("tree", [])
+    ]
+    return items, None
+
+
 def fetch_repo_structure_impl(repo_url: str, github_token: Optional[str] = None, max_files: Optional[int] = 20, package_path: str = ".") -> dict:
     """Fetch repo metadata, file tree, and key file contents for deploy analysis."""
     repo = repo_url.split("github.com/")[1].rstrip("/")
@@ -64,13 +117,25 @@ def fetch_repo_structure_impl(repo_url: str, github_token: Optional[str] = None,
     if "default_branch" not in meta:
         return {"error": f"Failed to fetch repository metadata: {meta.get('message', 'Unknown error')}"}
 
-    tree_resp = requests.get(
-        f"https://api.github.com/repos/{repo}/git/trees/{meta['default_branch']}?recursive=1",
-        headers=headers,
-    )
-    tree = tree_resp.json()
-    if tree_resp.status_code in (401, 403):
-        return {"error": "Unable to fetch repository tree due to authentication/rate-limit restrictions"}
+    normalized_package_path = _normalize_path(package_path)
+
+    if normalized_package_path != ".":
+        # Use targeted subtree navigation for sub-package paths.
+        # This avoids the 100k-entry truncation on large monorepos (e.g. vercel/next.js)
+        # by fetching only the subtree rooted at the requested directory.
+        all_items, tree_error = _navigate_to_subtree(
+            repo, meta["default_branch"], normalized_package_path, headers
+        )
+        if tree_error:
+            return {"error": tree_error}
+    else:
+        tree_resp = requests.get(
+            f"https://api.github.com/repos/{repo}/git/trees/{meta['default_branch']}?recursive=1",
+            headers=headers,
+        )
+        if tree_resp.status_code in (401, 403):
+            return {"error": "Unable to fetch repository tree due to authentication/rate-limit restrictions"}
+        all_items = tree_resp.json().get("tree", [])
 
     ref_resp = requests.get(
         f"https://api.github.com/repos/{repo}/git/ref/heads/{meta['default_branch']}",
@@ -78,27 +143,6 @@ def fetch_repo_structure_impl(repo_url: str, github_token: Optional[str] = None,
     )
     ref_data = ref_resp.json()
     commit_sha = ref_data.get("object", {}).get("sha", "unknown")
-
-    all_items = tree.get("tree", [])
-
-    # Validate package_path exists if not root
-    if package_path != ".":
-        normalized_package_path = _normalize_path(package_path)
-        package_exists = any(
-            item["type"] == "tree" and _normalize_path(item["path"]) == normalized_package_path
-            for item in all_items
-        )
-        if not package_exists:
-            return {"error": f"Package path '{package_path}' not found in repository"}
-        
-        # Filter tree items to only those under package_path
-        prefix = normalized_package_path + "/"
-        all_items = [
-            item
-            for item in all_items
-            if _normalize_path(item["path"]).startswith(prefix)
-            or _normalize_path(item["path"]) == normalized_package_path
-        ]
 
     key_filenames = [
         "package.json",

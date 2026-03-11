@@ -108,9 +108,125 @@ def _fallback_service_name(package_path: str, stack_tokens: List[str]) -> str:
     lower_path = _normalize_ctx(package_path).lower()
     if "backend" in lower_path or "api" in lower_path or {"fastapi", "flask", "django", "uvicorn", "gunicorn"}.intersection(token_set):
         return "api"
+    if "next-app" in lower_path or "web" in lower_path:
+        return "web"
     if "frontend" in lower_path or "web" in lower_path or {"next", "react", "vue", "svelte", "angular", "vite", "nginx"}.intersection(token_set):
         return "web"
     return "app"
+
+
+def _choose_fallback_build_context(scan: Dict[str, Any], package_path: str) -> str:
+    """Prefer a nested app directory when package_path is a container folder."""
+    package_norm = _normalize_ctx(package_path)
+    dirs = scan.get("dirs", [])
+    if not isinstance(dirs, list) or not dirs:
+        return package_norm
+
+    child_dirs = []
+    prefix = package_norm + "/"
+    for raw_dir in dirs:
+        normalized_dir = _normalize_ctx(str(raw_dir))
+        if not normalized_dir.startswith(prefix):
+            continue
+        relative = normalized_dir[len(prefix):]
+        if not relative or "/" in relative:
+            continue
+        child_dirs.append(normalized_dir)
+
+    if not child_dirs:
+        return package_norm
+
+    preferred_markers = ["next-app", "web", "frontend", "site", "client"]
+    for marker in preferred_markers:
+        for child in child_dirs:
+            if marker in child.lower().split("/")[-1]:
+                return child
+
+    return package_norm
+
+
+def _scan_has_existing_dockerfiles(scan: Dict[str, Any]) -> bool:
+    key_files = scan.get("key_files", {})
+    if not isinstance(key_files, dict):
+        return False
+    for path in key_files.keys():
+        lower_name = str(path).replace("\\", "/").split("/")[-1].lower()
+        if lower_name == "dockerfile" or lower_name.startswith("dockerfile.") or lower_name.endswith(".dockerfile"):
+            return True
+    return False
+
+
+def _scan_has_existing_compose(scan: Dict[str, Any]) -> bool:
+    key_files = scan.get("key_files", {})
+    if not isinstance(key_files, dict):
+        return False
+    compose_names = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+    for path in key_files.keys():
+        lower_name = str(path).replace("\\", "/").split("/")[-1].lower()
+        if lower_name in compose_names:
+            return True
+    return False
+
+
+def _apply_deterministic_fallback(
+    state: Dict[str, Any],
+    scan: Dict[str, Any],
+    package_path: str,
+    extraction_result: Dict[str, Any],
+    llm_stack_tokens: List[str] | None = None,
+) -> bool:
+    if not extraction_result.get("success"):
+        return False
+    if _is_mobile_package_path(package_path):
+        return False
+
+    fallback_build_context = _choose_fallback_build_context(scan, package_path)
+    fallback_port = int(extraction_result.get("port") or 3000)
+    probe_service = ServiceInfo(
+        name="fallback",
+        build_context=fallback_build_context,
+        port=fallback_port,
+        dockerfile_path="",
+    )
+    if _is_mobile_service(probe_service, scan):
+        return False
+
+    extracted_stack_tokens = extraction_result.get("stack_tokens", []) or []
+
+    # If we selected a nested child context and the parent extraction is sparse,
+    # retry deterministic extraction at the chosen child for better stack fidelity.
+    if not extracted_stack_tokens and fallback_build_context != _normalize_ctx(package_path):
+        repo_url = state.get("repo_url", "")
+        if repo_url:
+            try:
+                refined = extract_port_and_stack(
+                    repo_url,
+                    build_context=fallback_build_context,
+                    timeout=30,
+                    github_token=os.getenv("GITHUB_TOKEN"),
+                )
+                if refined.get("success"):
+                    extracted_stack_tokens = refined.get("stack_tokens", []) or extracted_stack_tokens
+            except Exception:
+                pass
+    combined_stack_tokens = normalize_stack_tokens([*(llm_stack_tokens or []), *extracted_stack_tokens])
+    fallback_name = _fallback_service_name(fallback_build_context, combined_stack_tokens)
+
+    state["stack_tokens"] = combined_stack_tokens
+    state["detected_stack"] = render_stack_summary(combined_stack_tokens)
+    state["services"] = [
+        ServiceInfo(
+            name=fallback_name,
+            build_context=fallback_build_context,
+            port=fallback_port,
+            dockerfile_path="",
+        ).model_dump()
+    ]
+    state["has_existing_dockerfiles"] = _scan_has_existing_dockerfiles(scan)
+    state["has_existing_compose"] = _scan_has_existing_compose(scan)
+    state["planner_used_deterministic_fallback"] = True
+    state["extraction_result"] = extraction_result
+    return True
 
 
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -229,26 +345,16 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 
         filtered_services = [s for s in data.services if not _is_mobile_service(s, scan)]
         if not filtered_services:
-            can_use_fallback = (
-                extraction_result.get("success")
-                and not _is_mobile_package_path(package_path)
-                and not _is_mobile_service(
-                    ServiceInfo(name="fallback", build_context=package_path, port=int(extracted_port or 3000), dockerfile_path=""),
-                    scan,
-                )
-            )
-            if can_use_fallback:
-                fallback_port = int(extracted_port or 3000)
-                fallback_name = _fallback_service_name(package_path, extracted_stack_tokens)
-                filtered_services = [
-                    ServiceInfo(
-                        name=fallback_name,
-                        build_context=_normalize_ctx(package_path),
-                        port=fallback_port,
-                        dockerfile_path="",
-                    )
-                ]
-                state["planner_used_deterministic_fallback"] = True
+            if _apply_deterministic_fallback(
+                state=state,
+                scan=scan,
+                package_path=package_path,
+                extraction_result=extraction_result,
+                llm_stack_tokens=data.stack_tokens,
+            ):
+                state["planner_retry_attempts"] = attempts_used
+                state["planner_fallback_used"] = fallback_used
+                return state
             else:
                 state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
                 return state
@@ -268,6 +374,15 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         state["planner_fallback_used"] = fallback_used
         state["extraction_result"] = extraction_result
     except Exception as e:
+        if _apply_deterministic_fallback(
+            state=state,
+            scan=scan,
+            package_path=package_path,
+            extraction_result=extraction_result,
+            llm_stack_tokens=[],
+        ):
+            return state
+
         error_details = str(e)
         state["error"] = f"Failed to analyze repository: {error_details}"
         

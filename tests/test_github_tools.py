@@ -12,32 +12,38 @@ class FakeResponse:
 
 
 def test_fetch_repo_structure_includes_relevant_markdown_docs(monkeypatch):
+    # For non-root package_path, the implementation now uses targeted subtree navigation
+    # instead of a full recursive tree fetch (avoids truncation on large monorepos).
     repo_api = "https://api.github.com/repos/owner/repo"
-    tree_api = "https://api.github.com/repos/owner/repo/git/trees/main?recursive=1"
+    root_tree_api = "https://api.github.com/repos/owner/repo/git/trees/main"
+    apps_tree_api = "https://api.github.com/repos/owner/repo/git/trees/apps-sha"
+    web_subtree_api = "https://api.github.com/repos/owner/repo/git/trees/web-sha?recursive=1"
     ref_api = "https://api.github.com/repos/owner/repo/git/ref/heads/main"
-    raw_root_readme = "https://raw.githubusercontent.com/owner/repo/main/README.md"
     raw_package_readme = "https://raw.githubusercontent.com/owner/repo/main/apps/web/README.md"
     raw_package_deploy = "https://raw.githubusercontent.com/owner/repo/main/apps/web/deployment.md"
     raw_package_json = "https://raw.githubusercontent.com/owner/repo/main/apps/web/package.json"
 
     responses = {
         repo_api: FakeResponse(200, {"full_name": "owner/repo", "default_branch": "main", "language": "TypeScript"}),
-        tree_api: FakeResponse(
-            200,
-            {
-                "tree": [
-                    {"path": "README.md", "type": "blob"},
-                    {"path": "docs/architecture.md", "type": "blob"},
-                    {"path": "apps/web", "type": "tree"},
-                    {"path": "apps/web/README.md", "type": "blob"},
-                    {"path": "apps/web/deployment.md", "type": "blob"},
-                    {"path": "apps/web/docs/notes.md", "type": "blob"},
-                    {"path": "apps/web/package.json", "type": "blob"},
-                ]
-            },
-        ),
+        # Step 1: root tree (non-recursive) — just needs the 'apps' directory entry
+        root_tree_api: FakeResponse(200, {"tree": [
+            {"path": "README.md", "type": "blob"},
+            {"path": "docs", "type": "tree", "sha": "docs-sha"},
+            {"path": "apps", "type": "tree", "sha": "apps-sha"},
+        ]}),
+        # Step 2: apps-level tree (non-recursive) — needs the 'web' directory entry
+        apps_tree_api: FakeResponse(200, {"tree": [
+            {"path": "web", "type": "tree", "sha": "web-sha"},
+        ]}),
+        # Step 3: web subtree (recursive) — paths are relative to apps/web/
+        web_subtree_api: FakeResponse(200, {"tree": [
+            {"path": "README.md", "type": "blob"},
+            {"path": "deployment.md", "type": "blob"},
+            {"path": "docs", "type": "tree"},
+            {"path": "docs/notes.md", "type": "blob"},
+            {"path": "package.json", "type": "blob"},
+        ]}),
         ref_api: FakeResponse(200, {"object": {"sha": "abc123"}}),
-        raw_root_readme: FakeResponse(200, text="# Root README"),
         raw_package_readme: FakeResponse(200, text="# Package README"),
         raw_package_deploy: FakeResponse(200, text="# Deploy"),
         raw_package_json: FakeResponse(200, text='{"name":"web"}'),

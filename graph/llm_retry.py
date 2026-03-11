@@ -124,7 +124,9 @@ def invoke_with_retry(
                 and not fallback_used
                 and attempt >= settings.fallback_after_attempt
             ):
-                current_prompt = fallback_prompt
+                # Keep full context from the original prompt and append stricter
+                # fallback instructions instead of replacing context entirely.
+                current_prompt = f"{prompt}\n\n{fallback_prompt}"
                 fallback_used = True
 
             backoff = _compute_backoff_seconds(attempt, settings)

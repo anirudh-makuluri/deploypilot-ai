@@ -75,7 +75,8 @@ def test_invoke_with_retry_uses_fallback_prompt_after_threshold():
     assert fallback_used is True
     assert prompts[0] == "primary"
     assert prompts[1] == "primary"
-    assert prompts[2] == "fallback"
+    assert prompts[2].startswith("primary")
+    assert "fallback" in prompts[2]
 
 
 def test_invoke_with_retry_raises_after_exhaustion():
