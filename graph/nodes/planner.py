@@ -96,6 +96,23 @@ def _is_mobile_service(service: ServiceInfo, scan: Dict[str, Any]) -> bool:
     return False
 
 
+def _is_mobile_package_path(package_path: str) -> bool:
+    normalized = _normalize_ctx(package_path).lower()
+    tokens = set(filter(None, normalized.split("/")))
+    mobile_tokens = {"mobile", "android", "ios", "react-native", "reactnative", "expo", "flutter"}
+    return any(token in mobile_tokens for token in tokens)
+
+
+def _fallback_service_name(package_path: str, stack_tokens: List[str]) -> str:
+    token_set = {token.lower() for token in stack_tokens}
+    lower_path = _normalize_ctx(package_path).lower()
+    if "backend" in lower_path or "api" in lower_path or {"fastapi", "flask", "django", "uvicorn", "gunicorn"}.intersection(token_set):
+        return "api"
+    if "frontend" in lower_path or "web" in lower_path or {"next", "react", "vue", "svelte", "angular", "vite", "nginx"}.intersection(token_set):
+        return "web"
+    return "app"
+
+
 def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Infer stack, services, and deployability from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
@@ -212,8 +229,29 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 
         filtered_services = [s for s in data.services if not _is_mobile_service(s, scan)]
         if not filtered_services:
-            state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
-            return state
+            can_use_fallback = (
+                extraction_result.get("success")
+                and not _is_mobile_package_path(package_path)
+                and not _is_mobile_service(
+                    ServiceInfo(name="fallback", build_context=package_path, port=int(extracted_port or 3000), dockerfile_path=""),
+                    scan,
+                )
+            )
+            if can_use_fallback:
+                fallback_port = int(extracted_port or 3000)
+                fallback_name = _fallback_service_name(package_path, extracted_stack_tokens)
+                filtered_services = [
+                    ServiceInfo(
+                        name=fallback_name,
+                        build_context=_normalize_ctx(package_path),
+                        port=fallback_port,
+                        dockerfile_path="",
+                    )
+                ]
+                state["planner_used_deterministic_fallback"] = True
+            else:
+                state["error"] = "No web-deployable services found. Repository appears to contain only mobile or non-deployable packages."
+                return state
         
         # Carefully override ports only for single-service repos with high-confidence extraction
         if len(filtered_services) == 1 and extracted_port and extraction_result.get("port_confidence", 0) >= 0.65:

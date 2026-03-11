@@ -75,3 +75,44 @@ def test_planner_returns_error_after_retry_exhaustion(monkeypatch):
 
     assert "error" in out
     assert "Failed to analyze repository" in out["error"]
+
+
+def test_planner_uses_deterministic_fallback_when_llm_services_empty(monkeypatch):
+    def _invoke(_prompt: str):
+        payload = {
+            "is_deployable": True,
+            "error_reason": "",
+            "stack_tokens": ["next", "node"],
+            "services": [],
+            "has_existing_dockerfiles": False,
+            "has_existing_compose": False,
+        }
+        return _Resp(json.dumps(payload))
+
+    monkeypatch.setattr("graph.nodes.planner.llm_planner", _FakePlannerLLM(_invoke))
+    monkeypatch.setattr(
+        "graph.nodes.planner.extract_port_and_stack",
+        lambda *args, **kwargs: {
+            "success": True,
+            "port": 3000,
+            "port_confidence": 0.9,
+            "stack_tokens": ["node", "next", "react"],
+        },
+    )
+
+    state = {
+        "repo_url": "https://github.com/example/repo",
+        "package_path": "apps/web",
+        "repo_scan": {
+            "key_files": {},
+            "dirs": [],
+        },
+    }
+
+    out = planner_node(state)
+
+    assert "error" not in out
+    assert out.get("planner_used_deterministic_fallback") is True
+    assert len(out["services"]) == 1
+    assert out["services"][0]["build_context"] == "apps/web"
+    assert out["services"][0]["port"] == 3000

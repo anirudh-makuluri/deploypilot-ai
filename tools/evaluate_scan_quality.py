@@ -114,7 +114,7 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
         expected_ports=label.get("expected_ports", {}),
     )
 
-    return {
+    report = {
         "repo": score.repo,
         "package_path": repo_result.get("package_path", "."),
         "error": repo_result.get("error"),
@@ -149,6 +149,44 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
             "missing_port_count": score.missing_port_count,
         },
     }
+    report["failure_bucket"] = _failure_bucket_from_report(report)
+    return report
+
+
+def _failure_bucket_from_report(report: Dict[str, Any]) -> str:
+    error_text = (report.get("error") or "").lower()
+    metrics = report.get("metrics", {}) or {}
+
+    if error_text:
+        if "package path" in error_text and "not found" in error_text:
+            return "scan_context_missing"
+        if "no repository context" in error_text:
+            return "planner_context_missing"
+        if "no web-deployable services found" in error_text:
+            return "planner_no_services"
+        return "runtime_error"
+
+    if metrics.get("stack_match") is False:
+        return "stack_mismatch"
+
+    known_port_count = int(metrics.get("known_port_count", 0) or 0)
+    correct_port_count = int(metrics.get("correct_port_count", 0) or 0)
+    missing_port_count = int(metrics.get("missing_port_count", 0) or 0)
+    if known_port_count > 0 and correct_port_count == 0:
+        if missing_port_count == known_port_count:
+            return "port_missing"
+        return "port_mismatch"
+
+    false_negatives = int(metrics.get("false_negatives", 0) or 0)
+    true_positives = int(metrics.get("true_positives", 0) or 0)
+    if false_negatives > 0 and true_positives == 0:
+        return "service_recall_miss"
+
+    false_positives = int(metrics.get("false_positives", 0) or 0)
+    if false_positives > 0:
+        return "service_precision_miss"
+
+    return "ok"
 
 
 def _default_output_path() -> str:
@@ -224,6 +262,11 @@ def run() -> int:
     summary["targets_with_labels"] = len(score_inputs)
     summary["targets_without_labels"] = len(unlabeled_targets)
     summary["targets_with_runtime_errors"] = len(run_errors)
+    failure_buckets: Dict[str, int] = {}
+    for report in scored_reports:
+        bucket = report.get("failure_bucket", "unknown")
+        failure_buckets[bucket] = failure_buckets.get(bucket, 0) + 1
+    summary["failure_buckets"] = failure_buckets
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
