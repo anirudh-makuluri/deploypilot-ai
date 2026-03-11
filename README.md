@@ -55,42 +55,24 @@ The AI reasoning engine uses a state-based workflow (LangGraph) to process repos
 
 ```mermaid
 graph TD
-    Start(("Start")) --> scan["Scanner Node <br> (Checks Supabase Cache)"]
-    scan -->|Cache Hit| endNode(("End (Return Cache)"))
-    scan -->|Error| endNode
-  scan -->|Cache Miss| planCall["Planner LLM Call"]
+    Start(("Start")) --> Scan["Scan Repository + Check Cache"]
+    Scan -->|Cache Hit| ReturnCache["Return Cached Analysis"]
+    Scan -->|Cache Miss| Plan["Plan Services & Stack"]
 
-  planCall --> planRetry["Retry Wrapper <br> (exp backoff + jitter)"]
-  planRetry --> planFallback["Fallback Prompt <br> (after repeated failures)"]
-  planFallback --> planRetry
-  planRetry -->|Success| planOK["Planner Output Validated"]
-  planRetry -->|Timeout / Retries Exhausted| endNode
+    Plan --> Dockerfile["Generate Dockerfile(s)"]
+    Dockerfile --> Compose["Generate docker-compose.yml"]
+    Compose --> Nginx["Generate nginx.conf"]
+    Nginx --> Verify["Verify (Hadolint + Risks + Confidence)"]
+    Verify --> Save["Save to Cache"]
 
-  planOK --> buildCall["Dockerfile Generator LLM Call"]
-  buildCall --> buildRetry["Retry Wrapper"]
-  buildRetry --> buildFallback["Fallback Prompt"]
-  buildFallback --> buildRetry
-  buildRetry -->|Success| composeCall["Compose Generator LLM Call"]
-  buildRetry -->|Timeout / Retries Exhausted| endNode
+    ReturnCache --> End(("End"))
+    Save --> End
 
-  composeCall --> composeRetry["Retry Wrapper"]
-  composeRetry --> composeFallback["Fallback Prompt"]
-  composeFallback --> composeRetry
-  composeRetry -->|Success| nginxCall["Nginx Generator LLM Call"]
-  composeRetry -->|Timeout / Retries Exhausted| endNode
-
-  nginxCall --> nginxRetry["Retry Wrapper"]
-  nginxRetry --> nginxFallback["Fallback Prompt"]
-  nginxFallback --> nginxRetry
-  nginxRetry -->|Success| verifyCall["Verifier LLM Call"]
-  nginxRetry -->|Timeout / Retries Exhausted| endNode
-
-  verifyCall --> verifyRetry["Retry Wrapper"]
-  verifyRetry --> verifyFallback["Fallback Prompt"]
-  verifyFallback --> verifyRetry
-  verifyRetry -->|Success| verifyDone["Verifier Node <br> (Saves to Cache)"]
-  verifyRetry -->|Timeout / Retries Exhausted| endNode
-  verifyDone --> endNode
+    Plan -.->|Failure after retries/timeouts| End
+    Dockerfile -.->|Failure after retries/timeouts| End
+    Compose -.->|Failure after retries/timeouts| End
+    Nginx -.->|Failure after retries/timeouts| End
+    Verify -.->|Failure after retries/timeouts| End
 ```
 
 ## Installation
