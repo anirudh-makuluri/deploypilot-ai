@@ -33,6 +33,18 @@
   - `POST /examples/preview`
 - Updated docs (`README.md`) with Supabase setup and example bank usage.
 
+### [x] 5. Benchmark Artifact Evaluation and Regression Coverage
+- Added weighted scoring contracts for Dockerfile, compose, and nginx artifacts.
+- Extended the benchmark runner to score existing repo artifacts and emit `artifact_summary`.
+- Added `--include-generated` mode to score generated artifacts separately via `generated_artifact_summary`.
+- Made compose generation conditional on multi-service repos in both the graph and generated benchmark flow.
+- Added compose-generation audit metrics: `wrong_compose_gen_rate`, `compose_missing_when_required_count`, and `compose_generated_when_not_required_count`.
+- Added regression fixtures and routing tests:
+  - `tests/test_artifact_evaluators.py`
+  - `tests/test_evaluate_scan_quality.py`
+  - `tests/test_graph_flow.py`
+- Updated benchmark docs to describe the new scoring and generated-evaluation modes.
+
 ## Pending (Sorted by Priority)
 
 ### [P0] 1. Feedback Loop for Failed or Low-Quality Output

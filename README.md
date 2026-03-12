@@ -7,9 +7,10 @@ SD-Artifacts is an AI deployment companion that scans GitHub repositories and ge
 - Automated repository scanning from GitHub (public and private with token).
 - Stack token inference and deployable service extraction.
 - Production-oriented Dockerfile generation with hadolint-aware verification.
-- Compose and Nginx generation for local/dev and reverse-proxy setup.
+- Conditional compose generation for multi-service repos and nginx generation for reverse-proxy setup.
 - Streaming endpoints (`/analyze/stream`, `/feedback/stream`) for real-time progress.
 - Supabase-backed analysis cache and example bank retrieval.
+- Benchmark runner for planner quality plus Dockerfile/compose/nginx artifact scoring.
 
 ## Architecture
 
@@ -20,7 +21,8 @@ graph TD
     Scan -->|Cache Miss| Plan["Plan Services & Stack"]
 
     Plan --> Dockerfile["Generate Dockerfile(s)"]
-    Dockerfile --> Compose["Generate docker-compose.yml"]
+    Dockerfile -->|Multi-service| Compose["Generate docker-compose.yml"]
+    Dockerfile -->|Single-service| Nginx["Generate nginx.conf"]
     Compose --> Nginx["Generate nginx.conf"]
     Nginx --> Verify["Verify (Hadolint + Risks + Confidence)"]
     Verify --> Save["Save to Cache"]
@@ -85,14 +87,29 @@ python app.py
 
 Detailed requests and response examples are in [docs/api-examples.md](docs/api-examples.md).
 
-## Benchmark Snapshot
+## Benchmarking
 
-Latest snapshot (`benchmarks/latest-scan-quality.json`):
-- Targets evaluated: 18
-- Service precision/recall/F1: 0.9583 / 0.9583 / 0.9583
-- Mobile leakage rate: 0.0
-- Stack accuracy: 1.0
-- Known-port accuracy: 0.9167 (22/24)
+The benchmark runner covers:
+- Scanner and planner quality against labeled repos
+- Checked-in artifact quality for Dockerfile, compose, and nginx
+- Optional generated-artifact quality with compose-generation audit metrics
+
+Run the standard benchmark:
+
+```bash
+python tools/evaluate_scan_quality.py \
+    --labels-file benchmarks/example_bank_labels.json
+```
+
+Run the generated-artifact benchmark:
+
+```bash
+python tools/evaluate_scan_quality.py \
+    --labels-file benchmarks/example_bank_labels.json \
+    --include-generated
+```
+
+See [docs/quality-and-testing.md](docs/quality-and-testing.md) for the metric definitions, thresholds, and output schema.
 
 ## Testing
 
