@@ -83,7 +83,7 @@ python app.py
 - `POST /examples/preview`: inspect examples used in prompt retrieval.
 - `DELETE /cache`: delete one cache row or all rows for a repository.
 
-Detailed requests and response examples are in `docs/api-examples.md`.
+Detailed requests and response examples are in [docs/api-examples.md](docs/api-examples.md).
 
 ## Benchmark Snapshot
 
@@ -105,11 +105,11 @@ python -m pytest tests -q
 
 ## Documentation Index
 
-- API examples: `docs/api-examples.md`
-- Feedback remediation flow: `docs/feedback-workflow.md`
-- Retry and timeout strategy: `docs/retry-timeout-strategy.md`
-- Quality metrics and testing details: `docs/quality-and-testing.md`
-- Stack token reference: `benchmarks/stack_tokens.md`
+- [API examples](docs/api-examples.md)
+- [Feedback remediation flow](docs/feedback-workflow.md)
+- [Retry and timeout strategy](docs/retry-timeout-strategy.md)
+- [Quality metrics and testing details](docs/quality-and-testing.md)
+- [Stack token reference](benchmarks/stack_tokens.md)
 
 ## Tech Stack
 
