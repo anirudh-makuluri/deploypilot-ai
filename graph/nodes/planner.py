@@ -103,6 +103,39 @@ def _is_mobile_package_path(package_path: str) -> bool:
     return any(token in mobile_tokens for token in tokens)
 
 
+def _is_infrastructure_service(service: ServiceInfo) -> bool:
+    """Return True when a service is a database, cache, or infrastructure dependency.
+    
+    These services should not be included in the deployment output as they are
+    typically managed separately or included in the service infrastructure.
+    """
+    name = (service.name or "").lower()
+    
+    # Database systems
+    database_services = {
+        "postgres", "postgresql", "mysql", "mariadb", "mongodb", "neo4j",
+        "elasticsearch", "opensearch", "cassandra", "couchdb", "dynamodb",
+        "firestore", "oracle", "mssql", "sqlite", "cockroachdb", "yugabyte"
+    }
+    
+    # Cache and message queue systems
+    cache_services = {
+        "redis", "memcached", "rabbitmq", "kafka", "activemq", "nsq",
+        "mqtt", "nats", "pulsar", "zookeeper", "consul", "etcd"
+    }
+    
+    # Load balancers and gateways
+    infra_services = {
+        "nginx", "apache", "haproxy", "traefik", "istio", "envoy",
+        "kong", "tyk", "vault", "prometheus", "grafana", "loki", "tempo",
+        "jaeger", "datadog", "newrelic", "splunk", "elk", "logstash"
+    }
+    
+    all_infra = database_services | cache_services | infra_services
+    
+    return name in all_infra or any(name.startswith(inf + "-") or name.endswith("-" + inf) for inf in all_infra)
+
+
 def _fallback_service_name(package_path: str, stack_tokens: List[str]) -> str:
     token_set = {token.lower() for token in stack_tokens}
     lower_path = _normalize_ctx(package_path).lower()
@@ -345,11 +378,14 @@ Tasks:
    - If NOT deployable, set is_deployable=false and provide the reason.
 
 2. If deployable, analyze the repo structure:
-    - Identify ONLY web-deployable services that need to be built (e.g., a monorepo might have a frontend and a websocket server in separate directories)
-    - EXCLUDE mobile app packages from services even if they exist in the same monorepo (React Native/Expo/Flutter/iOS/Android apps should never get Dockerfiles here)
-   - For each service, determine its name, build context directory, and port
-   - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
-   - Check if the repo already has a docker-compose.yml/yaml in key_files
+        - Identify ONLY web-deployable services that need to be built (e.g., a monorepo might have a frontend and a websocket server in separate directories)
+        - EXCLUDE:
+            * Mobile app packages (React Native/Expo/Flutter/iOS/Android) from services
+            * Database/cache services (PostgreSQL, MySQL, MongoDB, Neo4j, Redis, Elasticsearch, Kafka, etc.) — these are dependencies, not applications
+            * Infrastructure services (Nginx, Traefik, Prometheus, Grafana, etc.) — these are middleware/monitoring
+        - For each service, determine its name, build context directory, and port
+        - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
+        - Check if the repo already has a docker-compose.yml/yaml in key_files
 
 3. Return stack_tokens using ONLY canonical tokens from this allowed set:
     {allowed_stack_tokens}
@@ -414,7 +450,10 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             state["error"] = data.error_reason or "This repository is not deployable as a web service"
             return state
 
-        filtered_services = [s for s in data.services if not _is_mobile_service(s, scan)]
+        filtered_services = [
+            s for s in data.services 
+            if not _is_mobile_service(s, scan) and not _is_infrastructure_service(s)
+        ]
         if not filtered_services:
             if _apply_deterministic_fallback(
                 state=state,
