@@ -236,6 +236,14 @@ class ComposeScore:
     passed_threshold: bool
 
 
+@dataclass
+class NginxScore:
+    total_score: float
+    criteria_scores: Dict[str, float]
+    criterion_reasons: Dict[str, str]
+    passed_threshold: bool
+
+
 def _parse_dockerfile_lines(content: str) -> List[str]:
     """Parse Dockerfile content into non-comment, stripped lines."""
     lines = []
@@ -536,6 +544,168 @@ def score_compose(
     threshold = ARTIFACT_PASS_THRESHOLDS["compose"]
 
     return ComposeScore(
+        total_score=round(total, 6),
+        criteria_scores=criteria_scores,
+        criterion_reasons=reasons,
+        passed_threshold=total >= threshold,
+    )
+
+
+def _empty_nginx_score(message: str) -> NginxScore:
+    criteria = {
+        "route_coverage": 0.0,
+        "proxy_correctness": 0.0,
+        "security_headers": 0.0,
+        "websocket_handling": 0.0,
+        "syntax_sanity": 0.0,
+    }
+    reasons = {key: message for key in criteria.keys()}
+    return NginxScore(
+        total_score=0.0,
+        criteria_scores=criteria,
+        criterion_reasons=reasons,
+        passed_threshold=False,
+    )
+
+
+def _nginx_lines(content: str) -> List[str]:
+    lines: List[str] = []
+    for raw in (content or "").splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _extract_proxy_pass_targets(lines: List[str]) -> List[str]:
+    targets: List[str] = []
+    for line in lines:
+        lower = line.lower()
+        if not lower.startswith("proxy_pass"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        target = parts[1].rstrip(";")
+        targets.append(target)
+    return targets
+
+
+def _has_balanced_braces(content: str) -> bool:
+    balance = 0
+    for char in content:
+        if char == "{":
+            balance += 1
+        elif char == "}":
+            balance -= 1
+            if balance < 0:
+                return False
+    return balance == 0
+
+
+def score_nginx(
+    content: str,
+    expected_services: Optional[List[Dict[str, Any]]] = None,
+) -> NginxScore:
+    if not content or not content.strip():
+        return _empty_nginx_score("Empty or missing nginx config")
+
+    lines = _nginx_lines(content)
+    if not lines:
+        return _empty_nginx_score("Empty or missing nginx config")
+
+    weights = ARTIFACT_SCORE_WEIGHTS["nginx"]
+    criteria_scores: Dict[str, float] = {}
+    reasons: Dict[str, str] = {}
+
+    expected_names: Set[str] = set()
+    for service in expected_services or []:
+        if not isinstance(service, dict):
+            continue
+        name = normalize_name(str(service.get("name", "")))
+        if name:
+            expected_names.add(name)
+
+    lower_content = "\n".join(lines).lower()
+    proxy_targets = _extract_proxy_pass_targets(lines)
+    lower_proxy_targets = [target.lower() for target in proxy_targets]
+
+    if expected_names:
+        covered = 0
+        for name in expected_names:
+            if any(name in target for target in lower_proxy_targets) or name in lower_content:
+                covered += 1
+        coverage = covered / len(expected_names)
+        criteria_scores["route_coverage"] = round(coverage, 6)
+        if coverage == 1.0:
+            reasons["route_coverage"] = "All expected services have nginx route coverage"
+        else:
+            reasons["route_coverage"] = "Some expected services are missing route coverage"
+    else:
+        has_proxy = len(proxy_targets) > 0
+        criteria_scores["route_coverage"] = 1.0 if has_proxy else 0.0
+        reasons["route_coverage"] = "Proxy routes detected" if has_proxy else "No proxy routes detected"
+
+    if not proxy_targets:
+        criteria_scores["proxy_correctness"] = 0.0
+        reasons["proxy_correctness"] = "No proxy_pass directives found"
+    else:
+        valid_targets = 0
+        for target in proxy_targets:
+            normalized = target.lower()
+            if normalized.startswith("http://") or normalized.startswith("https://"):
+                valid_targets += 1
+            elif normalized.startswith("unix:"):
+                valid_targets += 1
+        proxy_ratio = valid_targets / len(proxy_targets)
+        criteria_scores["proxy_correctness"] = round(proxy_ratio, 6)
+        reasons["proxy_correctness"] = (
+            "proxy_pass targets look valid" if proxy_ratio == 1.0 else "Some proxy_pass targets look malformed"
+        )
+
+    required_headers = [
+        "x-content-type-options",
+        "x-frame-options",
+        "content-security-policy",
+    ]
+    found_headers = sum(1 for header in required_headers if header in lower_content)
+    header_ratio = found_headers / len(required_headers)
+    criteria_scores["security_headers"] = round(header_ratio, 6)
+    reasons["security_headers"] = (
+        "Security headers are configured"
+        if header_ratio == 1.0
+        else "One or more recommended security headers are missing"
+    )
+
+    has_upgrade = "upgrade" in lower_content
+    has_connection_upgrade = 'connection "upgrade"' in lower_content or "connection upgrade" in lower_content
+    has_http11 = "proxy_http_version 1.1" in lower_content
+    ws_parts = int(has_upgrade) + int(has_connection_upgrade) + int(has_http11)
+    websocket_ratio = ws_parts / 3
+    criteria_scores["websocket_handling"] = round(websocket_ratio, 6)
+    reasons["websocket_handling"] = (
+        "Websocket proxy settings detected"
+        if websocket_ratio == 1.0
+        else "Websocket proxy settings are partial or missing"
+    )
+
+    has_server_block = "server {" in lower_content or "server{" in lower_content
+    has_events_or_http = "events {" in lower_content or "http {" in lower_content
+    braces_ok = _has_balanced_braces(content)
+    syntax_checks = [has_server_block, has_events_or_http, braces_ok]
+    syntax_ratio = sum(1 for check in syntax_checks if check) / len(syntax_checks)
+    criteria_scores["syntax_sanity"] = round(syntax_ratio, 6)
+    reasons["syntax_sanity"] = (
+        "Config structure looks syntactically sane"
+        if syntax_ratio == 1.0
+        else "Config structure may be incomplete or malformed"
+    )
+
+    total = sum(criteria_scores[key] * weights[key] for key in weights.keys())
+    threshold = ARTIFACT_PASS_THRESHOLDS["nginx"]
+
+    return NginxScore(
         total_score=round(total, 6),
         criteria_scores=criteria_scores,
         criterion_reasons=reasons,
