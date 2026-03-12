@@ -7,30 +7,24 @@ load_dotenv()
 
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
 
-llm_planner = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.1, "max_tokens": 4096}
-)
-llm_docker = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
-)
-llm_compose = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
-)
-llm_nginx = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
-)
-llm_verifier = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.0, "max_tokens": 4096}
-)
-llm_coordinator = ChatBedrock(
-    model_id=BEDROCK_MODEL_ID,
-    model_kwargs={"temperature": 0.2, "max_tokens": 4096}
-)
+_LLM_TEMPERATURES = {
+    "llm_planner": 0.1,
+    "llm_docker": 0.0,
+    "llm_compose": 0.0,
+    "llm_nginx": 0.0,
+    "llm_verifier": 0.0,
+    "llm_coordinator": 0.2,
+}
+
+def __getattr__(name: str):
+    if name in _LLM_TEMPERATURES:
+        instance = ChatBedrock(
+            model_id=BEDROCK_MODEL_ID,
+            model_kwargs={"temperature": _LLM_TEMPERATURES[name], "max_tokens": 4096}
+        )
+        globals()[name] = instance
+        return instance
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 RETRY_CONFIGS = {
