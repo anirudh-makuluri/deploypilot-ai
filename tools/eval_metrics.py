@@ -1,13 +1,49 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+import yaml
 
 from tools.stack_tokens import normalize_stack_tokens
 
 
 ServiceKey = Tuple[str, str]
 ContextKey = str
+
+ARTIFACT_SCORE_SCHEMA_VERSION = "v1"
+
+# Weights are normalized per artifact and used as the canonical contract for V2 scoring.
+ARTIFACT_SCORE_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "dockerfile": {
+        "base_image": 0.225,
+        "non_root_user": 0.225,
+        "expose_or_documented_port": 0.225,
+        "healthcheck": 0.10,
+        "stack_alignment": 0.225,
+    },
+    "compose": {
+        "service_coverage": 0.25,
+        "build_context_validity": 0.20,
+        "port_mappings": 0.20,
+        "env_placeholders": 0.15,
+        "volume_hygiene": 0.10,
+        "syntax_validity": 0.10,
+    },
+    "nginx": {
+        "route_coverage": 0.30,
+        "proxy_correctness": 0.25,
+        "security_headers": 0.20,
+        "websocket_handling": 0.15,
+        "syntax_sanity": 0.10,
+    },
+}
+
+ARTIFACT_PASS_THRESHOLDS: Dict[str, float] = {
+    "dockerfile": 0.90,
+    "compose": 0.90,
+    "nginx": 0.85,
+}
 
 
 @dataclass
@@ -174,6 +210,337 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     if denominator == 0:
         return 0.0
     return numerator / denominator
+
+
+def artifact_scoring_contract() -> Dict[str, Any]:
+    return {
+        "artifact_score_schema_version": ARTIFACT_SCORE_SCHEMA_VERSION,
+        "weights": ARTIFACT_SCORE_WEIGHTS,
+        "thresholds": ARTIFACT_PASS_THRESHOLDS,
+    }
+
+
+@dataclass
+class DockerfileScore:
+    total_score: float
+    criteria_scores: Dict[str, float]
+    criterion_reasons: Dict[str, str]
+    passed_threshold: bool
+
+
+@dataclass
+class ComposeScore:
+    total_score: float
+    criteria_scores: Dict[str, float]
+    criterion_reasons: Dict[str, str]
+    passed_threshold: bool
+
+
+def _parse_dockerfile_lines(content: str) -> List[str]:
+    """Parse Dockerfile content into non-comment, stripped lines."""
+    lines = []
+    for line in (content or "").split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(stripped.upper())
+    return lines
+
+
+def _dockerfile_has_base_image(lines: List[str]) -> bool:
+    """Check for FROM instruction."""
+    return any(line.startswith("FROM") for line in lines)
+
+
+def _dockerfile_has_non_root_user(lines: List[str]) -> bool:
+    """Check for USER instruction with non-root user."""
+    for line in lines:
+        if line.startswith("USER"):
+            parts = line.split()
+            if len(parts) >= 2:
+                user = parts[1]
+                if user not in ("0", "ROOT"):
+                    return True
+    return False
+
+
+def _dockerfile_has_expose_or_port(lines: List[str]) -> bool:
+    """Check for EXPOSE instruction or documented port in comments."""
+    return any(
+        line.startswith("EXPOSE")
+        for line in lines
+    )
+
+
+def _dockerfile_has_healthcheck(lines: List[str]) -> bool:
+    """Check for HEALTHCHECK instruction."""
+    return any(line.startswith("HEALTHCHECK") for line in lines)
+
+
+def _dockerfile_stack_alignment(lines: List[str], required_tokens: Optional[List[str]] = None) -> bool:
+    """Check if key stack markers appear in the Dockerfile."""
+    if not required_tokens:
+        return True
+    required_lower = {(token or "").lower() for token in required_tokens}
+    content_lower = "\n".join(lines).lower()
+    return all(token in content_lower for token in required_lower if token)
+
+
+def score_dockerfile(
+    content: str,
+    required_stack_tokens: Optional[List[str]] = None,
+) -> DockerfileScore:
+    """
+    Score a Dockerfile against weighted criteria.
+    Returns criterion-level scores and explainable reasons.
+    """
+    if not content or not content.strip():
+        return DockerfileScore(
+            total_score=0.0,
+            criteria_scores={
+                "base_image": 0.0,
+                "non_root_user": 0.0,
+                "expose_or_documented_port": 0.0,
+                "healthcheck": 0.0,
+                "stack_alignment": 0.0,
+            },
+            criterion_reasons={
+                "base_image": "Empty or missing Dockerfile",
+                "non_root_user": "Empty or missing Dockerfile",
+                "expose_or_documented_port": "Empty or missing Dockerfile",
+                "healthcheck": "Empty or missing Dockerfile",
+                "stack_alignment": "Empty or missing Dockerfile",
+            },
+            passed_threshold=False,
+        )
+
+    lines = _parse_dockerfile_lines(content)
+    weights = ARTIFACT_SCORE_WEIGHTS["dockerfile"]
+
+    criteria_scores: Dict[str, float] = {}
+    reasons: Dict[str, str] = {}
+
+    # Criterion 1: base_image
+    has_base = _dockerfile_has_base_image(lines)
+    criteria_scores["base_image"] = 1.0 if has_base else 0.0
+    reasons["base_image"] = "FROM instruction found" if has_base else "No FROM instruction found"
+
+    # Criterion 2: non_root_user
+    has_non_root = _dockerfile_has_non_root_user(lines)
+    criteria_scores["non_root_user"] = 1.0 if has_non_root else 0.0
+    reasons["non_root_user"] = "Non-root USER found" if has_non_root else "No non-root USER instruction"
+
+    # Criterion 3: expose_or_documented_port
+    has_expose = _dockerfile_has_expose_or_port(lines)
+    criteria_scores["expose_or_documented_port"] = 1.0 if has_expose else 0.0
+    reasons["expose_or_documented_port"] = "EXPOSE instruction or port documentation found" if has_expose else "No EXPOSE or port documentation"
+
+    # Criterion 4: healthcheck
+    has_healthcheck = _dockerfile_has_healthcheck(lines)
+    criteria_scores["healthcheck"] = 1.0 if has_healthcheck else 0.0
+    reasons["healthcheck"] = "HEALTHCHECK instruction found" if has_healthcheck else "No HEALTHCHECK instruction"
+
+    # Criterion 5: stack_alignment
+    stack_aligned = _dockerfile_stack_alignment(lines, required_stack_tokens)
+    criteria_scores["stack_alignment"] = 1.0 if stack_aligned else 0.0
+    reasons["stack_alignment"] = f"Stack tokens {required_stack_tokens} found in Dockerfile" if stack_aligned else f"Missing stack tokens {required_stack_tokens}"
+
+    # Compute total weighted score
+    total = sum(criteria_scores[key] * weights[key] for key in weights.keys())
+    threshold = ARTIFACT_PASS_THRESHOLDS["dockerfile"]
+
+    return DockerfileScore(
+        total_score=total,
+        criteria_scores=criteria_scores,
+        criterion_reasons=reasons,
+        passed_threshold=total >= threshold,
+    )
+
+
+def _empty_compose_score(message: str) -> ComposeScore:
+    criteria = {
+        "service_coverage": 0.0,
+        "build_context_validity": 0.0,
+        "port_mappings": 0.0,
+        "env_placeholders": 0.0,
+        "volume_hygiene": 0.0,
+        "syntax_validity": 0.0,
+    }
+    reasons = {key: message for key in criteria.keys()}
+    return ComposeScore(
+        total_score=0.0,
+        criteria_scores=criteria,
+        criterion_reasons=reasons,
+        passed_threshold=False,
+    )
+
+
+def score_compose(
+    content: str,
+    expected_services: Optional[List[Dict[str, Any]]] = None,
+) -> ComposeScore:
+    if not content or not content.strip():
+        return _empty_compose_score("Empty or missing compose file")
+
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        score = _empty_compose_score("Invalid compose YAML syntax")
+        score.criterion_reasons["syntax_validity"] = f"Invalid compose YAML syntax: {exc.__class__.__name__}"
+        return score
+
+    if not isinstance(parsed, dict):
+        return _empty_compose_score("Compose root must be a YAML object")
+
+    services_raw = parsed.get("services")
+    if not isinstance(services_raw, dict):
+        return _empty_compose_score("Missing or invalid services section")
+
+    weights = ARTIFACT_SCORE_WEIGHTS["compose"]
+    criteria_scores: Dict[str, float] = {}
+    reasons: Dict[str, str] = {}
+
+    criteria_scores["syntax_validity"] = 1.0
+    reasons["syntax_validity"] = "Compose YAML parsed successfully"
+
+    expected_map: Dict[str, str] = {}
+    for expected in expected_services or []:
+        if not isinstance(expected, dict):
+            continue
+        name = normalize_name(str(expected.get("name", "")))
+        context = normalize_path(str(expected.get("build_context", ".")))
+        if name:
+            expected_map[name] = context
+
+    service_names = [normalize_name(name) for name in services_raw.keys()]
+    normalized_service_names = {name for name in service_names if name}
+
+    if expected_map:
+        covered = len(set(expected_map.keys()) & normalized_service_names)
+        total_expected = len(expected_map)
+        coverage = covered / total_expected if total_expected else 1.0
+        missing = sorted(set(expected_map.keys()) - normalized_service_names)
+        criteria_scores["service_coverage"] = round(coverage, 6)
+        if missing:
+            reasons["service_coverage"] = f"Missing expected services: {', '.join(missing)}"
+        else:
+            reasons["service_coverage"] = "All expected services are present"
+    else:
+        criteria_scores["service_coverage"] = 1.0 if normalized_service_names else 0.0
+        reasons["service_coverage"] = (
+            "Service entries found" if normalized_service_names else "No services defined"
+        )
+
+    build_defined = 0
+    build_valid = 0
+    for raw_name, cfg in services_raw.items():
+        if not isinstance(cfg, dict):
+            continue
+        name = normalize_name(str(raw_name))
+        if "build" not in cfg:
+            continue
+        build_defined += 1
+        build_value = cfg.get("build")
+        actual_context: Optional[str] = None
+        if isinstance(build_value, str):
+            actual_context = normalize_path(build_value)
+        elif isinstance(build_value, dict):
+            context_value = build_value.get("context")
+            if isinstance(context_value, str) and context_value.strip():
+                actual_context = normalize_path(context_value)
+
+        if actual_context is None:
+            continue
+        if name in expected_map:
+            if normalize_path(expected_map[name]) == actual_context:
+                build_valid += 1
+        else:
+            build_valid += 1
+
+    if build_defined == 0:
+        criteria_scores["build_context_validity"] = 0.0
+        reasons["build_context_validity"] = "No build contexts found"
+    else:
+        build_ratio = build_valid / build_defined
+        criteria_scores["build_context_validity"] = round(build_ratio, 6)
+        if build_ratio == 1.0:
+            reasons["build_context_validity"] = "All build contexts are valid"
+        else:
+            reasons["build_context_validity"] = "One or more build contexts are invalid or mismatched"
+
+    services_with_ports = 0
+    for cfg in services_raw.values():
+        if not isinstance(cfg, dict):
+            continue
+        ports = cfg.get("ports")
+        if isinstance(ports, list) and len(ports) > 0:
+            services_with_ports += 1
+    total_services = len([cfg for cfg in services_raw.values() if isinstance(cfg, dict)])
+    if total_services == 0:
+        criteria_scores["port_mappings"] = 0.0
+        reasons["port_mappings"] = "No valid services available for port checks"
+    else:
+        port_ratio = services_with_ports / total_services
+        criteria_scores["port_mappings"] = round(port_ratio, 6)
+        reasons["port_mappings"] = (
+            "All services declare ports" if port_ratio == 1.0 else "Some services are missing ports"
+        )
+
+    env_configured = 0
+    env_total = 0
+    for cfg in services_raw.values():
+        if not isinstance(cfg, dict):
+            continue
+        if "environment" in cfg:
+            env_total += 1
+            env_value = cfg.get("environment")
+            if isinstance(env_value, dict):
+                env_configured += 1
+            elif isinstance(env_value, list) and env_value:
+                env_configured += 1
+    if env_total == 0:
+        criteria_scores["env_placeholders"] = 1.0
+        reasons["env_placeholders"] = "No environment placeholders required"
+    else:
+        env_ratio = env_configured / env_total
+        criteria_scores["env_placeholders"] = round(env_ratio, 6)
+        reasons["env_placeholders"] = (
+            "Environment placeholders are present" if env_ratio == 1.0 else "Some environment blocks are malformed"
+        )
+
+    volume_valid = 0
+    volume_total = 0
+    for cfg in services_raw.values():
+        if not isinstance(cfg, dict):
+            continue
+        volumes = cfg.get("volumes")
+        if volumes is None:
+            continue
+        if isinstance(volumes, list):
+            volume_total += 1
+            if all(isinstance(v, (str, dict)) for v in volumes):
+                volume_valid += 1
+        else:
+            volume_total += 1
+    if volume_total == 0:
+        criteria_scores["volume_hygiene"] = 1.0
+        reasons["volume_hygiene"] = "No volumes declared"
+    else:
+        volume_ratio = volume_valid / volume_total
+        criteria_scores["volume_hygiene"] = round(volume_ratio, 6)
+        reasons["volume_hygiene"] = (
+            "Volume declarations are valid" if volume_ratio == 1.0 else "One or more volume declarations are invalid"
+        )
+
+    total = sum(criteria_scores[key] * weights[key] for key in weights.keys())
+    threshold = ARTIFACT_PASS_THRESHOLDS["compose"]
+
+    return ComposeScore(
+        total_score=round(total, 6),
+        criteria_scores=criteria_scores,
+        criterion_reasons=reasons,
+        passed_threshold=total >= threshold,
+    )
 
 
 def summarize_scores(scores: List[RepoScore]) -> Dict[str, float | int]:

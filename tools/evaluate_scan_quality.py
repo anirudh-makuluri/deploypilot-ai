@@ -20,7 +20,7 @@ if PROJECT_ROOT not in sys.path:
 
 from graph.nodes import planner_node
 from tools.benchmark_storage import save_benchmark_artifact, save_benchmark_artifact_from_path
-from tools.eval_metrics import score_repo, summarize_scores
+from tools.eval_metrics import ARTIFACT_PASS_THRESHOLDS, score_compose, score_dockerfile, score_repo, summarize_scores
 from tools.github_tools import fetch_repo_structure_impl
 
 
@@ -57,10 +57,21 @@ def _load_labels(path: str) -> List[Dict[str, Any]]:
         repo, repo_url = _resolve_label_repo(row)
         if not repo or not repo_url:
             continue
+
+        artifact_expectations = row.get("artifact_expectations", {})
+        if not isinstance(artifact_expectations, dict):
+            artifact_expectations = {}
+
+        artifact_scoring_overrides = row.get("artifact_scoring_overrides", {})
+        if not isinstance(artifact_scoring_overrides, dict):
+            artifact_scoring_overrides = {}
+
         normalized = dict(row)
         normalized["repo"] = repo
         normalized["repo_url"] = repo_url
         normalized["package_path"] = (row.get("package_path") or ".").strip() or "."
+        normalized["artifact_expectations"] = artifact_expectations
+        normalized["artifact_scoring_overrides"] = artifact_scoring_overrides
         labels.append(normalized)
     return labels
 
@@ -100,7 +111,83 @@ def _run_planner_for_repo(repo: str, repo_url: str, github_token: Optional[str],
         "stack_summary": planned.get("detected_stack", ""),
         "stack_tokens": planned.get("stack_tokens", []),
         "package_path": package_path,
+        "key_files": scan.get("key_files", {}),
     }
+
+
+def _select_compose_file(key_files: Dict[str, str], package_path: str) -> tuple[Optional[str], str]:
+    compose_filenames = {
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    }
+    if not key_files:
+        return None, ""
+
+    normalized_package = (package_path or ".").replace("\\", "/").strip("/")
+
+    candidates: List[tuple[int, str, str]] = []
+    for path, content in key_files.items():
+        normalized_path = (path or "").replace("\\", "/")
+        filename = normalized_path.rsplit("/", 1)[-1]
+        if filename not in compose_filenames:
+            continue
+
+        if normalized_package and normalized_package != ".":
+            prefix = f"{normalized_package}/"
+            if normalized_path.startswith(prefix):
+                priority = 0
+            else:
+                priority = 2
+        else:
+            priority = 0 if "/" not in normalized_path else 1
+
+        candidates.append((priority, normalized_path, content or ""))
+
+    if not candidates:
+        return None, ""
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, selected_path, selected_content = candidates[0]
+    return selected_path, selected_content
+
+
+def _select_dockerfile(key_files: Dict[str, str], package_path: str) -> tuple[Optional[str], str]:
+    if not key_files:
+        return None, ""
+
+    normalized_package = (package_path or ".").replace("\\", "/").strip("/")
+
+    candidates: List[tuple[int, str, str]] = []
+    for path, content in key_files.items():
+        normalized_path = (path or "").replace("\\", "/")
+        filename = normalized_path.rsplit("/", 1)[-1]
+        is_dockerfile = (
+            filename == "Dockerfile"
+            or filename.startswith("Dockerfile.")
+            or filename.endswith(".Dockerfile")
+        )
+        if not is_dockerfile:
+            continue
+
+        if normalized_package and normalized_package != ".":
+            prefix = f"{normalized_package}/"
+            if normalized_path.startswith(prefix):
+                priority = 0
+            else:
+                priority = 2
+        else:
+            priority = 0 if "/" not in normalized_path else 1
+
+        candidates.append((priority, normalized_path, content or ""))
+
+    if not candidates:
+        return None, ""
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, selected_path, selected_content = candidates[0]
+    return selected_path, selected_content
 
 
 def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,6 +200,23 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
         predicted_stack=repo_result.get("stack_summary", ""),
         predicted_stack_tokens=repo_result.get("stack_tokens", []),
         expected_ports=label.get("expected_ports", {}),
+    )
+
+    compose_path, compose_content = _select_compose_file(
+        repo_result.get("key_files", {}),
+        repo_result.get("package_path", "."),
+    )
+    compose_score = score_compose(
+        compose_content,
+        expected_services=label.get("expected_services", []),
+    )
+    dockerfile_path, dockerfile_content = _select_dockerfile(
+        repo_result.get("key_files", {}),
+        repo_result.get("package_path", "."),
+    )
+    dockerfile_score = score_dockerfile(
+        dockerfile_content,
+        required_stack_tokens=label.get("required_stack_tokens", []),
     )
 
     report = {
@@ -148,6 +252,22 @@ def _build_repo_report(repo_result: Dict[str, Any], label: Dict[str, Any]) -> Di
             "known_port_count": score.known_port_count,
             "correct_port_count": score.correct_port_count,
             "missing_port_count": score.missing_port_count,
+        },
+        "artifact_scores": {
+            "dockerfile": {
+                "file_path": dockerfile_path,
+                "total_score": dockerfile_score.total_score,
+                "passed_threshold": dockerfile_score.passed_threshold,
+                "criteria_scores": dockerfile_score.criteria_scores,
+                "criterion_reasons": dockerfile_score.criterion_reasons,
+            },
+            "compose": {
+                "file_path": compose_path,
+                "total_score": compose_score.total_score,
+                "passed_threshold": compose_score.passed_threshold,
+                "criteria_scores": compose_score.criteria_scores,
+                "criterion_reasons": compose_score.criterion_reasons,
+            }
         },
     }
     report["failure_bucket"] = _failure_bucket_from_report(report)
@@ -269,6 +389,46 @@ def run() -> int:
         bucket = report.get("failure_bucket", "unknown")
         failure_buckets[bucket] = failure_buckets.get(bucket, 0) + 1
     summary["failure_buckets"] = failure_buckets
+
+    compose_scores = []
+    compose_passes = 0
+    dockerfile_scores = []
+    dockerfile_passes = 0
+    for report in scored_reports:
+        artifacts = report.get("artifact_scores") or {}
+
+        compose = (artifacts.get("compose") or {})
+        compose_file_path = compose.get("file_path")
+        compose_total_score = compose.get("total_score")
+        if compose_file_path and isinstance(compose_total_score, (int, float)):
+            compose_scores.append(float(compose_total_score))
+            if bool(compose.get("passed_threshold")):
+                compose_passes += 1
+
+        dockerfile = (artifacts.get("dockerfile") or {})
+        dockerfile_file_path = dockerfile.get("file_path")
+        dockerfile_total_score = dockerfile.get("total_score")
+        if dockerfile_file_path and isinstance(dockerfile_total_score, (int, float)):
+            dockerfile_scores.append(float(dockerfile_total_score))
+            if bool(dockerfile.get("passed_threshold")):
+                dockerfile_passes += 1
+
+    compose_count = len(compose_scores)
+    dockerfile_count = len(dockerfile_scores)
+    summary["artifact_summary"] = {
+        "dockerfile": {
+            "scored_repo_count": dockerfile_count,
+            "avg_total_score": (sum(dockerfile_scores) / dockerfile_count) if dockerfile_count else 0.0,
+            "pass_rate": (dockerfile_passes / dockerfile_count) if dockerfile_count else 0.0,
+            "pass_threshold": ARTIFACT_PASS_THRESHOLDS["dockerfile"],
+        },
+        "compose": {
+            "scored_repo_count": compose_count,
+            "avg_total_score": (sum(compose_scores) / compose_count) if compose_count else 0.0,
+            "pass_rate": (compose_passes / compose_count) if compose_count else 0.0,
+            "pass_threshold": ARTIFACT_PASS_THRESHOLDS["compose"],
+        }
+    }
 
     report = {
         "run_id": run_id,

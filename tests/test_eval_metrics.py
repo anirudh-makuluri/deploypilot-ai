@@ -1,4 +1,10 @@
-from tools.eval_metrics import score_repo, summarize_scores
+from tools.eval_metrics import (
+    ARTIFACT_PASS_THRESHOLDS,
+    ARTIFACT_SCORE_WEIGHTS,
+    artifact_scoring_contract,
+    score_repo,
+    summarize_scores,
+)
 
 
 def test_score_repo_counts_tp_fp_fn_and_leakage():
@@ -76,3 +82,18 @@ def test_summarize_scores_computes_expected_ratios():
     assert summary["correct_port_count"] == 1
     assert summary["port_accuracy_known"] == 0.5
     assert summary["port_unknown_rate"] == 0.0
+
+
+def test_artifact_scoring_contract_is_versioned_and_complete():
+    contract = artifact_scoring_contract()
+
+    assert contract["artifact_score_schema_version"] == "v1"
+    assert contract["weights"] == ARTIFACT_SCORE_WEIGHTS
+    assert contract["thresholds"] == ARTIFACT_PASS_THRESHOLDS
+
+
+def test_artifact_weights_are_normalized_per_artifact():
+    for artifact, criteria in ARTIFACT_SCORE_WEIGHTS.items():
+        assert criteria
+        assert round(sum(criteria.values()), 6) == 1.0, artifact
+
