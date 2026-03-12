@@ -24,6 +24,19 @@ from tools.eval_metrics import ARTIFACT_PASS_THRESHOLDS, score_compose, score_do
 from tools.github_tools import fetch_repo_structure_impl
 
 
+RUNTIME_STACK_TOKENS = {
+    "node",
+    "python",
+    "go",
+    "java",
+    "dotnet",
+    "php",
+    "ruby",
+    "rust",
+    "bun",
+}
+
+
 def _repo_from_url_or_full_name(value: str) -> str:
     text = (value or "").strip()
     if "github.com/" in text:
@@ -462,7 +475,16 @@ def _build_artifact_summary(scored_reports: List[Dict[str, Any]]) -> Dict[str, A
 
 def _build_generated_artifact_scores(generated_result: Dict[str, Any], label: Dict[str, Any]) -> Dict[str, Any]:
     dockerfiles = generated_result.get("dockerfiles", {}) or {}
-    required_stack_tokens = label.get("required_stack_tokens", [])
+    required_stack_tokens = [str(token).lower() for token in (label.get("required_stack_tokens", []) or []) if str(token).strip()]
+    generated_services = generated_result.get("services", [])
+    service_count = len(generated_services) if isinstance(generated_services, list) and generated_services else len(dockerfiles)
+
+    # For multi-service repos, score Dockerfiles against runtime tokens only.
+    # Framework/UI tokens are often repo-level and not expected to appear in every service Dockerfile.
+    if service_count > 1:
+        effective_required_stack_tokens = [token for token in required_stack_tokens if token in RUNTIME_STACK_TOKENS]
+    else:
+        effective_required_stack_tokens = required_stack_tokens
 
     dockerfile_entries: Dict[str, Any] = {}
     dockerfile_total_scores: List[float] = []
@@ -476,7 +498,7 @@ def _build_generated_artifact_scores(generated_result: Dict[str, Any], label: Di
     }
 
     for service_name, content in dockerfiles.items():
-        scored = score_dockerfile(str(content or ""), required_stack_tokens=required_stack_tokens)
+        scored = score_dockerfile(str(content or ""), required_stack_tokens=effective_required_stack_tokens)
         dockerfile_entries[str(service_name)] = {
             "total_score": scored.total_score,
             "passed_threshold": scored.passed_threshold,

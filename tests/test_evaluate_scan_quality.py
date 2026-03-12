@@ -252,19 +252,19 @@ def test_build_artifact_summary_includes_nginx_and_combined():
 
 
 def test_build_generated_artifact_scores_handles_generated_content():
-        generated = {
-                "dockerfiles": {
-                        "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
-                        "api": "FROM python:3.12-slim\nUSER app\nEXPOSE 8000\nHEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1",
-                },
-                "docker_compose": """
+    generated = {
+        "dockerfiles": {
+            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+            "api": "FROM python:3.12-slim\nUSER app\nEXPOSE 8000\nHEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1",
+        },
+        "docker_compose": """
 services:
     web:
         build: .
         ports:
             - \"3000:3000\"
 """,
-                "nginx_conf": """
+        "nginx_conf": """
 events { worker_connections 1024; }
 http {
     server {
@@ -280,40 +280,67 @@ http {
     }
 }
 """,
-        }
-        label = {
-                "expected_services": [{"name": "web", "build_context": "."}],
-                "required_stack_tokens": [],
-        }
+    }
+    label = {
+        "expected_services": [{"name": "web", "build_context": "."}],
+        "required_stack_tokens": [],
+    }
 
-        scores = _build_generated_artifact_scores(generated, label)
+    scores = _build_generated_artifact_scores(generated, label)
 
-        assert scores["dockerfile"]["file_path"] == "__generated_dockerfiles__"
-        assert scores["compose"]["file_path"] == "__generated_docker_compose__"
-        assert scores["nginx"]["file_path"] == "__generated_nginx_conf__"
-        assert "web" in scores["dockerfile"]["per_service"]
-        assert "api" in scores["dockerfile"]["per_service"]
+    assert scores["dockerfile"]["file_path"] == "__generated_dockerfiles__"
+    assert scores["compose"]["file_path"] == "__generated_docker_compose__"
+    assert scores["nginx"]["file_path"] == "__generated_nginx_conf__"
+    assert "web" in scores["dockerfile"]["per_service"]
+    assert "api" in scores["dockerfile"]["per_service"]
 
 
 def test_build_generated_artifact_scores_handles_missing_generated_content():
-        generated = {
-                "dockerfiles": {},
-                "docker_compose": "",
-                "nginx_conf": "",
-        }
-        label = {
-                "expected_services": [{"name": "web", "build_context": "."}],
-                "required_stack_tokens": ["node"],
-        }
+    generated = {
+        "dockerfiles": {},
+        "docker_compose": "",
+        "nginx_conf": "",
+    }
+    label = {
+        "expected_services": [{"name": "web", "build_context": "."}],
+        "required_stack_tokens": ["node"],
+    }
 
-        scores = _build_generated_artifact_scores(generated, label)
+    scores = _build_generated_artifact_scores(generated, label)
 
-        assert scores["dockerfile"]["file_path"] is None
-        assert scores["dockerfile"]["total_score"] == 0.0
-        assert scores["compose"]["file_path"] is None
-        assert scores["compose"]["total_score"] == 0.0
-        assert scores["nginx"]["file_path"] is None
-        assert scores["nginx"]["total_score"] == 0.0
+    assert scores["dockerfile"]["file_path"] is None
+    assert scores["dockerfile"]["total_score"] == 0.0
+    assert scores["compose"]["file_path"] is None
+    assert scores["compose"]["total_score"] == 0.0
+    assert scores["nginx"]["file_path"] is None
+    assert scores["nginx"]["total_score"] == 0.0
+
+
+def test_build_generated_artifact_scores_uses_runtime_tokens_for_multi_service():
+    generated = {
+        "services": [
+            {"name": "backend", "build_context": "apps/backend", "port": 5000},
+            {"name": "web", "build_context": "apps/web", "port": 3000},
+        ],
+        "dockerfiles": {
+            "backend": "FROM node:20-alpine\nUSER node\nEXPOSE 5000\nHEALTHCHECK CMD wget -qO- http://localhost:5000 || exit 1",
+            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+        },
+        "docker_compose": "",
+        "nginx_conf": "",
+    }
+    label = {
+        "required_stack_tokens": ["node", "react"],
+        "expected_services": [
+            {"name": "backend", "build_context": "apps/backend"},
+            {"name": "web", "build_context": "apps/web"},
+        ],
+    }
+
+    scores = _build_generated_artifact_scores(generated, label)
+
+    assert scores["dockerfile"]["per_service"]["backend"]["criteria_scores"]["stack_alignment"] == 1.0
+    assert scores["dockerfile"]["per_service"]["web"]["criteria_scores"]["stack_alignment"] == 1.0
 
 
 def test_compose_generation_audit_detects_missing_when_required():
