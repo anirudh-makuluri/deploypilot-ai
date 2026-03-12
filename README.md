@@ -109,6 +109,21 @@ python tools/evaluate_scan_quality.py \
     --include-generated
 ```
 
+Latest scan quality snapshot (benchmarks/latest-scan-quality.json):
+- Run ID: 20260312-214917
+- Targets evaluated: 5
+- Service precision/recall/F1: 1.0 / 1.0 / 1.0
+- Mobile leakage rate: 0.0
+- Stack accuracy: 1.0
+- Known-port accuracy: 1.0 (7/7)
+- Compose generation audit: wrong_compose_gen_rate = 0.0 (0/5)
+- Failure buckets: ok = 5
+- Generated artifact summary:
+    - Dockerfile avg/pass-rate: 0.8875 / 0.4
+    - Compose avg/pass-rate: 0.95 / 1.0
+    - Nginx avg/pass-rate: 0.843333 / 0.6
+    - Combined avg/all-present-pass-rate: 0.8794443 / 0.2
+
 See [docs/quality-and-testing.md](docs/quality-and-testing.md) for the metric definitions, thresholds, and output schema.
 
 ## Testing

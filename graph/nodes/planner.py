@@ -38,6 +38,83 @@ def _normalize_ctx(path: str) -> str:
     return normalized or "."
 
 
+def _dedupe_services_by_context(services: List[ServiceInfo]) -> List[ServiceInfo]:
+    deduped: List[ServiceInfo] = []
+    seen_by_identity: dict[tuple[str, int], int] = {}
+
+    for service in services:
+        normalized_context = _normalize_ctx(service.build_context)
+        service.build_context = normalized_context
+        dedupe_key = (normalized_context, int(service.port))
+
+        existing_index = seen_by_identity.get(dedupe_key)
+        if existing_index is None:
+            seen_by_identity[dedupe_key] = len(deduped)
+            deduped.append(service)
+            continue
+
+        existing = deduped[existing_index]
+        existing_has_dockerfile = bool((existing.dockerfile_path or "").strip())
+        current_has_dockerfile = bool((service.dockerfile_path or "").strip())
+
+        if current_has_dockerfile and not existing_has_dockerfile:
+            deduped[existing_index] = service
+
+    return deduped
+
+
+def _apply_per_service_port_refinement(
+    services: List[ServiceInfo],
+    repo_url: str,
+    package_path: str,
+    extraction_result: Dict[str, Any],
+    github_token: str | None,
+) -> None:
+    if not services or not repo_url:
+        return
+
+    context_cache: dict[str, Dict[str, Any]] = {}
+    context_counts: dict[str, int] = {}
+    for service in services:
+        normalized_context = _normalize_ctx(service.build_context)
+        context_counts[normalized_context] = context_counts.get(normalized_context, 0) + 1
+
+    package_context = _normalize_ctx(package_path)
+    if isinstance(extraction_result, dict):
+        context_cache[package_context] = extraction_result
+
+    for service in services:
+        context = _normalize_ctx(service.build_context)
+        if context_counts.get(context, 0) > 1:
+            # Shared build context can legitimately host multiple services with different ports.
+            continue
+
+        result = context_cache.get(context)
+
+        if result is None:
+            try:
+                result = extract_port_and_stack(
+                    repo_url,
+                    build_context=context,
+                    timeout=30,
+                    github_token=github_token,
+                )
+            except Exception:
+                result = {"success": False}
+            context_cache[context] = result
+
+        if not isinstance(result, dict) or not result.get("success"):
+            continue
+
+        detected_port = result.get("port")
+        confidence = float(result.get("port_confidence", 0.0) or 0.0)
+        source = str(result.get("port_source", "") or "")
+
+        # Ignore weak fallback defaults; prefer explicit per-context evidence.
+        if isinstance(detected_port, int) and confidence >= 0.45 and source != "final_default":
+            service.port = detected_port
+
+
 def _is_mobile_service(service: ServiceInfo, scan: Dict[str, Any]) -> bool:
     """Return True when a service appears to be mobile-only (React Native/Expo/Flutter/iOS/Android)."""
     name = (service.name or "").lower()
@@ -335,6 +412,7 @@ def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
             print(f"Warning: Port/stack extraction failed (proceeding with LLM only): {e}")
             extraction_result = {"success": False, "error": str(e)}
     
+    github_token = os.getenv("GITHUB_TOKEN")
     extracted_port = extraction_result.get("port")
     extracted_stack_tokens = extraction_result.get("stack_tokens", [])
     extraction_context = ""
@@ -454,6 +532,7 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             s for s in data.services 
             if not _is_mobile_service(s, scan) and not _is_infrastructure_service(s)
         ]
+        filtered_services = _dedupe_services_by_context(filtered_services)
         if not filtered_services:
             if _apply_deterministic_fallback(
                 state=state,
@@ -477,6 +556,14 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             and extraction_result.get("port_confidence", 0) >= 0.65
         ):
             filtered_services[0].port = extracted_port
+        elif len(filtered_services) > 1:
+            _apply_per_service_port_refinement(
+                services=filtered_services,
+                repo_url=repo_url,
+                package_path=package_path,
+                extraction_result=extraction_result,
+                github_token=github_token,
+            )
         
         combined_stack_tokens = normalize_stack_tokens([*data.stack_tokens, *extracted_stack_tokens])
 
