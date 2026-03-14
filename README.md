@@ -102,6 +102,14 @@ python tools/evaluate_scan_quality.py \
     --max-workers 2
 ```
 
+Use a different labels file by passing its path explicitly, for example:
+
+```bash
+python tools/evaluate_scan_quality.py \
+    --labels-file benchmarks/my_labels.json \
+    --max-workers 2
+```
+
 Run the generated-artifact benchmark:
 
 ```bash
@@ -117,29 +125,36 @@ Concurrency notes:
 - For network-heavy benchmark runs, `2` to `4` workers usually reduces wall-clock time.
 
 Latest scan quality snapshot (benchmarks/latest-scan-quality.json):
-- Run ID: 20260313-000022
-- Targets evaluated: 5
-- Service precision/recall/F1: 1.0 / 1.0 / 1.0
+- Run ID: 20260313-023948
+- Targets evaluated: 18
+- Service precision/recall/F1: 1.0 / 0.9583 / 0.9787
 - Mobile leakage rate: 0.0
 - Stack accuracy: 1.0
-- Known-port accuracy: 1.0 (7/7)
-- Compose generation audit: wrong_compose_gen_rate = 0.0 (0/5)
-- Failure buckets: ok = 5
+- Known-port accuracy: 0.875 (21/24)
+- Port unknown rate: 0.0417
+- Compose generation audit: wrong_compose_gen_rate = 0.0 (0/18)
+- Failure buckets: ok = 18
 - Generated artifact summary:
     - Dockerfile avg/pass-rate: 1.0 / 1.0
-    - Compose avg/pass-rate: 0.95 / 1.0
-    - Nginx avg/pass-rate: 0.980 / 1.0
-    - Combined avg/all-present-pass-rate: 0.9856 / 1.0
+    - Compose avg/pass-rate: 0.9208 / 0.6667
+    - Nginx avg/pass-rate: 0.9685 / 0.8889
+    - Combined avg/all-present-pass-rate: 0.9770 / 0.7778
 
 See [docs/quality-and-testing.md](docs/quality-and-testing.md) for the metric definitions, thresholds, and output schema.
 
 ## Testing
 
-Run tests:
+Run the full test suite:
 
 ```bash
 pip install pytest
 python -m pytest tests -q
+```
+
+Run the benchmark-focused regression suite:
+
+```bash
+python -m pytest tests/test_node_retry_integration.py tests/test_evaluate_scan_quality.py -q
 ```
 
 ## Documentation Index

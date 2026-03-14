@@ -6,12 +6,15 @@ This document covers test execution and objective scan-quality benchmarking.
 
 Current tests include:
 - `tests/test_app_endpoints.py`: API endpoint behavior and response contracts.
-- `tests/test_artifact_evaluators.py`: regression fixtures for Dockerfile, compose, and nginx artifact scoring.
+- `tests/test_artifact_evaluators.py`: shared artifact evaluator regression fixtures.
 - `tests/test_feedback_workflow.py`: feedback coordinator and remediation behavior.
 - `tests/test_llm_retry.py`: retry wrapper behavior and exhaustion paths.
-- `tests/test_node_retry_integration.py`: retry integration across graph execution.
+- `tests/test_node_retry_integration.py`: planner and retry integration, including service dedupe and per-service port refinement.
 - `tests/test_port_and_stack_extractor.py`: stack token and port extraction logic.
-- `tests/test_eval_metrics.py`: scan quality metric calculations.
+- `tests/test_eval_metrics.py`: aggregate scan quality metric calculations.
+- `tests/test_eval_metrics_dockerfile.py`: Dockerfile artifact scoring criteria.
+- `tests/test_eval_metrics_compose.py`: Compose artifact scoring criteria.
+- `tests/test_eval_metrics_nginx.py`: Nginx artifact scoring criteria.
 - `tests/test_evaluate_scan_quality.py`: end-to-end benchmark script behavior.
 - `tests/test_graph_flow.py`: graph routing behavior, including conditional compose generation.
 - `tests/test_github_tools.py`: GitHub utility behavior during scanning.
@@ -27,6 +30,11 @@ Run a specific module:
 python -m pytest tests/test_app_endpoints.py -q
 ```
 
+Run the benchmark/planner regression subset:
+```bash
+python -m pytest tests/test_node_retry_integration.py tests/test_evaluate_scan_quality.py -q
+```
+
 ## Scan Quality Benchmarking
 
 The benchmark runner evaluates two layers of quality against a labels file:
@@ -38,6 +46,7 @@ When `--include-generated` is enabled, the runner also executes the generator no
 ### 1) Prepare labels
 
 Create `benchmarks/example_bank_labels.json` using `benchmarks/example_bank_labels.sample.json` as a template.
+If you use a different filename, pass it via `--labels-file path/to/labels.json`.
 
 Label fields:
 - `repo_url` (preferred full GitHub URL)
@@ -129,23 +138,24 @@ Generated-mode compose audit logic:
 
 ### 5) Latest benchmark snapshot (V2)
 
-From `benchmarks/latest-scan-quality.json` (run `20260313-000022`, 5 labeled targets):
+From `benchmarks/latest-scan-quality.json` (run `20260313-023948`, 18 labeled targets):
 
 **Planner metrics:**
 - `service_precision`: 1.0
-- `service_recall`: 1.0
-- `service_f1`: 1.0
+- `service_recall`: 0.9583
+- `service_f1`: 0.9787
 - `mobile_leakage_rate`: 0.0
 - `stack_accuracy`: 1.0
-- `port_accuracy_known`: 1.0 (7/7)
+- `port_accuracy_known`: 0.875 (21/24)
+- `port_unknown_rate`: 0.0417
 - `wrong_compose_gen_rate`: 0.0
-- Failure buckets: ok = 5
+- Failure buckets: ok = 18
 
 **Generated artifact metrics (`--include-generated`):**
 - Dockerfile: avg = 1.0, pass_rate = 1.0 (threshold 0.90)
-- Compose: avg = 0.95, pass_rate = 1.0 (threshold 0.90)
-- Nginx: avg = 0.980, pass_rate = 1.0 (threshold 0.85)
-- Combined: avg = 0.986, all_present_pass_rate = 1.0
+- Compose: avg = 0.9208, pass_rate = 0.6667 (threshold 0.90)
+- Nginx: avg = 0.9685, pass_rate = 0.8889 (threshold 0.85)
+- Combined: avg = 0.9770, all_present_pass_rate = 0.7778
 
 **V2 scope note:** V2 covers artifact benchmarking and generation-quality improvement for Dockerfile, docker-compose, and nginx. Infrastructure service classification and infra-specific generation are deferred to V3.
 
