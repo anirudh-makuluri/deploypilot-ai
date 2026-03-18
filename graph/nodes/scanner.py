@@ -131,8 +131,8 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 if response.data and len(response.data) > 0:
                     cached = _pick_best_cached_response(response.data, requested_package_path)
                     if cached:
-                        print(f"Cache hit for {state['repo_url']} at {commit_sha} (package_path={requested_package_path})")
                         state["cached_response"] = cached
+                        state["repo_scan"] = scan
                         return state
                 break  # Query succeeded but returned no data, exit retry loop
             except Exception as e:
