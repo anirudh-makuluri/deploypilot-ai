@@ -88,7 +88,9 @@ def _filter_risks(
             continue
 
         # Generic hardening nits that are not required blockers for this project.
-        if "apk" in lowered and any(token in lowered for token in ("non-pinned", "not pinning", "pinning", "unpinned")):
+        if "apk" in lowered and any(token in lowered for token in ("non-pinned", "not pinning", "pinning", "unpinned", "unversioned")):
+            continue
+        if "hadolint" in lowered and "unversioned" in lowered and "package" in lowered:
             continue
         if "base node" in lowered and "pinning" in lowered:
             continue

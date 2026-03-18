@@ -98,12 +98,12 @@ def test_deterministic_confidence_drops_with_risks_and_missing_artifacts():
 
 
 def test_filter_risks_drops_localhost_nginx_warning_for_host_nginx_model():
-        risks = ["NGINX config uses localhost for upstream servers, which may not work in containerized environment"]
-        services = [
-                {"name": "backend", "port": 5000},
-                {"name": "web", "port": 3000},
-        ]
-        compose = """
+    risks = ["NGINX config uses localhost for upstream servers, which may not work in containerized environment"]
+    services = [
+        {"name": "backend", "port": 5000},
+        {"name": "web", "port": 3000},
+    ]
+    compose = """
 services:
     backend:
         ports:
@@ -112,8 +112,14 @@ services:
         ports:
             - 3000:3000
 """
-        nginx = "location / { proxy_pass http://localhost:3000; }"
+    nginx = "location / { proxy_pass http://localhost:3000; }"
 
-        filtered = _filter_risks(risks, services, {}, compose, nginx)
+    filtered = _filter_risks(risks, services, {}, compose, nginx)
 
-        assert filtered == []
+    assert filtered == []
+
+
+def test_filter_risks_drops_hadolint_unversioned_wording():
+    risks = ["Hadolint warns about unversioned package installations in Dockerfiles"]
+    filtered = _filter_risks(risks, [{"name": "api", "port": 8000}], {"api": "FROM node:20"}, "", "")
+    assert filtered == []

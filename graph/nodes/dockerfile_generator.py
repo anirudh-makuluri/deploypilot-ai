@@ -48,6 +48,11 @@ def _repair_dockerfile_output(
 
     build_ctx = _normalize_ctx(str(service.get("build_context", ".") or "."))
     has_root_pnpm_lock = isinstance(key_files, dict) and "pnpm-lock.yaml" in key_files
+    has_workspace_manifest = isinstance(key_files, dict) and "pnpm-workspace.yaml" in key_files
+    has_root_package = isinstance(key_files, dict) and "package.json" in key_files
+    has_workspace_packages = isinstance(key_files, dict) and any(
+        str(path).startswith("packages/") for path in key_files.keys()
+    )
 
     # In monorepos with root lockfile, ensure service Dockerfiles copy root lockfile,
     # not a non-existent nested lockfile like apps/web/pnpm-lock.yaml.
@@ -61,6 +66,31 @@ def _repair_dockerfile_output(
             if new_fixed != fixed:
                 fixed = new_fixed
                 changed = True
+
+    # In pnpm monorepos, install dependencies with workspace context from repo root.
+    if has_root_pnpm_lock and build_ctx != "." and "pnpm i --frozen-lockfile" in fixed:
+        copy_lines: list[str] = []
+        if has_root_package:
+            copy_lines.append("COPY package.json ./")
+        copy_lines.append("COPY pnpm-lock.yaml* ./")
+        if has_workspace_manifest:
+            copy_lines.append("COPY pnpm-workspace.yaml* ./")
+        copy_lines.append(f"COPY {build_ctx}/package.json {build_ctx}/package.json")
+        if has_workspace_packages:
+            copy_lines.append("COPY packages ./packages")
+
+        copy_block = "\n".join(copy_lines)
+        copy_pattern = rf"(?im)^\s*COPY\s+{re.escape(build_ctx)}/package\.json\s+pnpm-lock\.yaml\*\s+\./\s*$"
+        new_fixed = re.sub(copy_pattern, copy_block, fixed)
+        if new_fixed != fixed:
+            fixed = new_fixed
+            changed = True
+
+        install_pattern = r"(?im)corepack\s+enable\s+pnpm\s*&&\s*pnpm\s+i\s+--frozen-lockfile"
+        new_fixed = re.sub(install_pattern, f"corepack enable pnpm && pnpm i --frozen-lockfile --filter ./{build_ctx}...", fixed)
+        if new_fixed != fixed:
+            fixed = new_fixed
+            changed = True
 
     scripts_set = {s.strip() for s in available_scripts}
 
@@ -82,6 +112,31 @@ def _repair_dockerfile_output(
     if new_fixed != fixed:
         fixed = new_fixed
         changed = True
+
+    # Normalize shell-form node CMD to JSON exec form for better signal handling.
+    cmd_match = re.search(r"(?im)^\s*CMD\s+node\s+([^\n]+?)\s*$", fixed)
+    if cmd_match:
+        arg = cmd_match.group(1).strip().strip('"').strip("'")
+        if arg and not arg.startswith("["):
+            new_fixed = re.sub(
+                r"(?im)^\s*CMD\s+node\s+[^\n]+\s*$",
+                f'CMD ["node", "{arg}"]',
+                fixed,
+                count=1,
+            )
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
+
+    # If HEALTHCHECK uses wget, ensure runner stage installs wget.
+    if "HEALTHCHECK" in fixed and "wget" in fixed and "apk add --no-cache wget" not in fixed:
+        runner_anchor = re.search(r"(?im)^FROM\s+base\s+AS\s+runner\s*$", fixed)
+        if runner_anchor:
+            insert_pos = runner_anchor.end()
+            new_fixed = fixed[:insert_pos] + "\nRUN apk add --no-cache wget" + fixed[insert_pos:]
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
 
     return fixed if changed else content
 
@@ -146,11 +201,14 @@ Rules:
 4. Run as non-root user.
 5. EXPOSE the correct port and add HEALTHCHECK.
 6. Use `http://localhost:<port>/` for HTTP healthchecks (avoid `/health` unless strongly required by code evidence).
-7. Only run `pnpm build` when a `build` script exists for this service.
-8. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
-9. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-10. Do NOT include any preamble like 'IMPROVED Dockerfile:' or commentary. Return ONLY the raw Dockerfile.
-11. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
+7. If HEALTHCHECK uses `wget` or `curl`, ensure that tool is installed in the final runner stage.
+8. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
+9. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
+10. Only run `pnpm build` when a `build` script exists for this service.
+11. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
+12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
+13. Do NOT include any preamble like 'IMPROVED Dockerfile:' or commentary. Return ONLY the raw Dockerfile.
+14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
         else:
             examples = fetch_reference_examples(
@@ -182,11 +240,14 @@ Rules:
 4. Run as non-root user.
 5. EXPOSE the port and add HEALTHCHECK.
 6. Use `http://localhost:<port>/` for HTTP healthchecks (avoid `/health` unless strongly required by code evidence).
-7. Only run `pnpm build` when a `build` script exists for this service.
-8. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
-9. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-10. Do NOT include any preamble or commentary. Return ONLY the raw Dockerfile.
-11. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
+7. If HEALTHCHECK uses `wget` or `curl`, ensure that tool is installed in the final runner stage.
+8. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
+9. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
+10. Only run `pnpm build` when a `build` script exists for this service.
+11. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
+12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
+13. Do NOT include any preamble or commentary. Return ONLY the raw Dockerfile.
+14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
         
         try:
