@@ -123,3 +123,9 @@ def test_filter_risks_drops_hadolint_unversioned_wording():
     risks = ["Hadolint warns about unversioned package installations in Dockerfiles"]
     filtered = _filter_risks(risks, [{"name": "api", "port": 8000}], {"api": "FROM node:20"}, "", "")
     assert filtered == []
+
+
+def test_filter_risks_drops_compose_env_placeholder_warning():
+    risks = ["Docker-compose uses environment variables that are not explicitly defined in the file"]
+    filtered = _filter_risks(risks, [{"name": "api", "port": 8000}], {"api": "FROM node:20"}, "services:\n  api:\n    environment:\n      - SECRET=${SECRET}", "")
+    assert filtered == []

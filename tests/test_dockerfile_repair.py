@@ -1,7 +1,7 @@
 from graph.nodes.dockerfile_generator import _repair_dockerfile_output
 
 
-def test_repair_adds_wget_to_runner_when_healthcheck_uses_wget():
+def test_repair_removes_healthcheck_instructions():
     content = """FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
@@ -19,7 +19,7 @@ HEALTHCHECK CMD wget -qO- http://localhost:5000 || exit 1
         available_scripts=["build"],
     )
 
-    assert "RUN apk add --no-cache wget" in repaired
+    assert "HEALTHCHECK" not in repaired
 
 
 def test_repair_monorepo_install_uses_workspace_context_and_filter():
@@ -63,3 +63,80 @@ CMD node server.js
     )
 
     assert 'CMD ["node", "server.js"]' in repaired
+
+
+def test_repair_prefers_pnpm_start_for_backend_when_start_script_exists():
+    content = """FROM node:20-alpine AS runner
+CMD ["node", "app.js"]
+"""
+
+    repaired = _repair_dockerfile_output(
+        content=content,
+        service={"name": "backend", "build_context": "apps/backend"},
+        key_files={},
+        available_scripts=["start", "build"],
+    )
+
+    assert 'CMD ["pnpm", "start"]' in repaired
+
+
+def test_repair_copies_packages_when_packages_dir_marker_present():
+    content = """FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json ./
+COPY pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml* ./
+COPY apps/backend/package.json apps/backend/package.json
+RUN corepack enable pnpm && pnpm i --frozen-lockfile --filter ./apps/backend...
+"""
+
+    repaired = _repair_dockerfile_output(
+        content=content,
+        service={"name": "backend", "build_context": "apps/backend"},
+        key_files={
+            "pnpm-lock.yaml": "lock",
+            "pnpm-workspace.yaml": "workspace",
+            "package.json": "{}",
+            "__has_packages_dir__": True,
+        },
+        available_scripts=["start"],
+    )
+
+    assert "COPY packages ./packages" in repaired
+
+
+def test_repair_fixes_duplicate_filter_and_nested_node_modules_copy_and_build_step():
+    content = """FROM node:20-alpine AS base
+FROM base AS deps
+WORKDIR /app
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/backend/package.json ./apps/backend/package.json
+RUN corepack enable pnpm && pnpm i --frozen-lockfile --filter ./apps/backend... --filter ./apps/backend...
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+WORKDIR /app/apps/backend
+FROM base AS runner
+WORKDIR /app
+COPY --from=builder /app/apps/backend/node_modules ./node_modules
+COPY --from=builder /app/apps/backend .
+"""
+
+    repaired = _repair_dockerfile_output(
+        content=content,
+        service={"name": "backend", "build_context": "apps/backend"},
+        key_files={
+            "pnpm-lock.yaml": "lock",
+            "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+            "package.json": "{}",
+            "apps/backend/package.json": '{"scripts": {"build": "echo build"}}',
+            "packages/shared/package.json": "{}",
+        },
+        available_scripts=["build"],
+    )
+
+    assert repaired.count("--filter ./apps/backend...") == 1
+    assert "COPY --from=builder /app/node_modules ./node_modules" in repaired
+    assert "RUN if [ -f package.json ] && grep -q '\"build\"' package.json; then" in repaired
+    assert "\nFROM base AS builder\n" in repaired

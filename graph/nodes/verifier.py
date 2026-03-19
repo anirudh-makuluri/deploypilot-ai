@@ -129,6 +129,10 @@ def _filter_risks(
             if not any(marker in compose_lower for marker in hardcoded_secret_markers):
                 continue
 
+        # Environment placeholders in compose are expected for deploy-time injection.
+        if "docker-compose" in lowered and "environment variable" in lowered and "not explicitly defined" in lowered:
+            continue
+
         # Suppress websocket hardening warnings when required proxy headers are present.
         if "websocket" in lowered and "nginx" in lowered and "security" in lowered:
             has_ws_route = "location /ws" in nginx_lower

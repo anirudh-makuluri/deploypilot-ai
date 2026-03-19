@@ -47,6 +47,7 @@ class AnalyzeResponse(BaseModel):
     risks: List[str]
     confidence: float
     hadolint_results: Dict[str, str] = {}
+    commands: Dict = Field(default_factory=dict)
     token_usage: TokenUsage = TokenUsage()
 
 
@@ -155,6 +156,7 @@ async def analyze_repo(req: AnalyzeRequest):
         risks=result.get("risks", []),
         confidence=result.get("confidence", 0.0),
         hadolint_results=result.get("hadolint_results", {}),
+        commands=result.get("commands", {}),
         token_usage=TokenUsage(**tracker.get_usage())
     )
     
@@ -305,6 +307,7 @@ async def analyze_repo_stream(req: AnalyzeRequest):
                 risks=full_state.get("risks", []),
                 confidence=full_state.get("confidence", 0.0),
                 hadolint_results=full_state.get("hadolint_results", {}),
+                commands=full_state.get("commands", {}),
                 token_usage=TokenUsage(**tracker.get_usage())
             )
             
@@ -367,6 +370,7 @@ async def improve_with_feedback(req: FeedbackRequest):
         risks=improved["risks"],
         confidence=improved["confidence"],
         hadolint_results=improved["hadolint_results"],
+        commands=improved.get("commands", {}),
         token_usage=TokenUsage(**tracker.get_usage()),
     )
 
@@ -434,6 +438,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                 risks=improved["risks"],
                 confidence=improved["confidence"],
                 hadolint_results=improved["hadolint_results"],
+                commands=improved.get("commands", {}),
                 token_usage=TokenUsage(**tracker.get_usage()),
             )
 

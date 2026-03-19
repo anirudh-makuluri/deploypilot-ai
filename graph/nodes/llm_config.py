@@ -67,7 +67,7 @@ Rules:
 - Use multi-stage build when applicable.
 - Use slim/alpine base images.
 - Run as non-root user.
-- Include EXPOSE and HEALTHCHECK.
+    - Include EXPOSE and do NOT include HEALTHCHECK instructions.
 - Output raw Dockerfile only.
 """.strip(),
         "compose": """

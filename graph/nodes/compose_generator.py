@@ -14,6 +14,53 @@ def _normalize_path(path: str) -> str:
     return normalized or "."
 
 
+def _build_deterministic_compose(services: list[dict[str, Any]]) -> str:
+    """Generate a deterministic baseline compose file from planner services."""
+    compose: dict[str, Any] = {
+        "services": {},
+        "networks": {
+            "app-network": {
+                "driver": "bridge",
+            }
+        },
+    }
+
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        name = str(svc.get("name", "")).strip()
+        if not name:
+            continue
+
+        build_context = str(svc.get("build_context", ".") or ".")
+        dockerfile_path = _normalize_dockerfile_path(str(svc.get("dockerfile_path", "") or ""))
+        try:
+            port_int = int(svc.get("port")) if svc.get("port") is not None else None
+        except (TypeError, ValueError):
+            port_int = None
+
+        build: Any
+        if dockerfile_path:
+            build = {
+                "context": build_context,
+                "dockerfile": dockerfile_path,
+            }
+        else:
+            build = build_context
+
+        entry: dict[str, Any] = {
+            "build": build,
+            "restart": "unless-stopped",
+            "networks": ["app-network"],
+        }
+        if port_int:
+            entry["ports"] = [f"{port_int}:{port_int}"]
+
+        compose["services"][name] = entry
+
+    return yaml.safe_dump(compose, sort_keys=False)
+
+
 def _normalize_dockerfile_path(path: str) -> str:
     normalized = (path or "").replace("\\", "/").strip()
     if normalized.startswith("./"):
@@ -504,14 +551,20 @@ def compose_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     references = format_examples_for_prompt(examples)
     
+    baseline_compose = existing_compose if isinstance(existing_compose, str) and existing_compose.strip() else _build_deterministic_compose(services)
+    baseline_compose = _repair_compose_output(baseline_compose, services, scan)
+
     if existing_compose:
         prompt = f"""
-You are a DevOps expert reviewing an existing docker-compose.yml.
+You are a DevOps expert refining a deterministic baseline docker-compose.yml.
 
 Services in this repo:
 {services_desc}
 
 Stack: {state.get('detected_stack', 'unknown')}
+
+DETERMINISTIC BASELINE docker-compose.yml:
+{baseline_compose}
 
 EXISTING docker-compose.yml:
 {existing_compose}
@@ -519,8 +572,7 @@ EXISTING docker-compose.yml:
 REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
 {references}
 
-Review this docker-compose. If it correctly maps all services with proper build contexts, ports, volumes, and includes any needed external services (databases, caches, etc.), return it AS-IS.
-If it can be improved (missing services, wrong ports, missing health checks, etc.), return the IMPROVED version.
+Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
 
 Rules:
 - Each app service should build from its respective directory with the correct Dockerfile.
@@ -537,7 +589,7 @@ Rules:
 """
     else:
         prompt = f"""
-Generate a docker-compose.yml for production deployment.
+    You are a DevOps expert refining a deterministic baseline docker-compose.yml.
 
 Services to include:
 {services_desc}
@@ -545,10 +597,13 @@ Services to include:
 Stack: {state.get('detected_stack', 'unknown')}
 Repo scan: {json.dumps(scan, indent=2)}
 
+DETERMINISTIC BASELINE docker-compose.yml:
+{baseline_compose}
+
 REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
 {references}
 
-Rules:
+Improve the baseline compose file using these rules:
 - Each app service should build from its respective build context directory with the correct Dockerfile.
 - For pnpm monorepos with a root lockfile, prefer `build.context: .` and service Dockerfiles like `apps/backend/Dockerfile`.
 - If two services use the same Dockerfile filename (for example both are named Dockerfile), keep them as separate services when build contexts differ.
@@ -577,7 +632,9 @@ Rules:
         state["compose_retry_attempts"] = attempts_used
         state["compose_fallback_used"] = fallback_used
     except Exception as e:
-        state["error"] = f"Failed generating docker-compose.yml: {e}"
-        return state
+        state["docker_compose"] = baseline_compose
+        state["compose_retry_attempts"] = RETRY_CONFIGS["compose"].max_attempts
+        state["compose_fallback_used"] = True
+        state["compose_generation_warning"] = f"llm_refine_failed:{e}"
     
     return state

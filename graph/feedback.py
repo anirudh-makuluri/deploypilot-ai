@@ -177,7 +177,7 @@ CURRENT Dockerfile:
 Rules:
 - Apply coordinator instructions.
 - Keep all currently-correct parts unchanged.
-- Maintain production best practices (multi-stage, non-root, healthcheck).
+- Maintain production best practices (multi-stage, non-root) and do NOT include HEALTHCHECK instructions.
 - Output ONLY raw Dockerfile content.
 """
         try:

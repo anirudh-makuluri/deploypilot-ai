@@ -244,20 +244,25 @@ def nginx_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     ])
     route_guidance = _infer_route_guidance(scan, services)
     
+    baseline_nginx = existing_nginx if isinstance(existing_nginx, str) and existing_nginx.strip() else _default_nginx_conf(services)
+    baseline_nginx = _repair_nginx_output(baseline_nginx, services)
+
     if existing_nginx:
         prompt = f"""
-You are a DevOps expert reviewing an existing nginx.conf.
+You are a DevOps expert refining a deterministic baseline nginx.conf.
 
 Services:
 {services_desc}
 
 {route_guidance}
 
+DETERMINISTIC BASELINE nginx.conf:
+{baseline_nginx}
+
 EXISTING nginx.conf:
 {existing_nginx}
 
-Review this nginx config. If it correctly routes to all services with proper security headers, return it AS-IS.
-If it can be improved, return the IMPROVED version.
+Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
 
 Rules:
 - Listen on port 80.
@@ -274,14 +279,17 @@ Rules:
 """
     else:
         prompt = f"""
-You are a DevOps expert given the task to write a nginx.conf for production deployment.
+    You are a DevOps expert refining a deterministic baseline nginx.conf.
 
 Services:
 {services_desc}
 
 {route_guidance}
 
-Rules:
+DETERMINISTIC BASELINE nginx.conf:
+{baseline_nginx}
+
+Improve the baseline config using these rules:
 - Listen on port 80.
 - Always include structurally complete config blocks with balanced braces.
 - Route traffic to each service appropriately.
@@ -311,7 +319,9 @@ Rules:
         state["nginx_retry_attempts"] = attempts_used
         state["nginx_fallback_used"] = fallback_used
     except Exception as e:
-        state["error"] = f"Failed generating nginx.conf: {e}"
-        return state
+        state["nginx_conf"] = baseline_nginx
+        state["nginx_retry_attempts"] = RETRY_CONFIGS["nginx"].max_attempts
+        state["nginx_fallback_used"] = True
+        state["nginx_generation_warning"] = f"llm_refine_failed:{e}"
     
     return state

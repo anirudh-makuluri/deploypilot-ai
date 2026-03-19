@@ -5,6 +5,7 @@ from .nodes import (
     scanner_node,
     planner_node,
     dockerfile_generator_node,
+    commands_generator_node,
     compose_generator_node,
     nginx_generator_node,
     verifier_node
@@ -15,6 +16,7 @@ workflow = StateGraph(dict)
 
 workflow.add_node("scanner", scanner_node)
 workflow.add_node("planner", planner_node)
+workflow.add_node("commands_gen", commands_generator_node)
 workflow.add_node("docker_gen", dockerfile_generator_node)
 workflow.add_node("compose_gen", compose_generator_node)
 workflow.add_node("nginx_gen", nginx_generator_node)
@@ -55,17 +57,18 @@ workflow.add_conditional_edges(
     },
 )
 
-# Planner -> Dockerfile gen (or END on error)
+# Planner -> Commands gen (or END on error)
 workflow.add_conditional_edges(
     "planner",
     check_planner_error,
     {
         "error": END,
-        "continue": "docker_gen",
+        "continue": "commands_gen",
     },
 )
 
-# Flow: docker_gen -> compose_gen (if needed) -> nginx_gen -> verifier -> END
+# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> verifier -> END
+workflow.add_edge("commands_gen", "docker_gen")
 workflow.add_conditional_edges(
     "docker_gen",
     check_compose_required,
