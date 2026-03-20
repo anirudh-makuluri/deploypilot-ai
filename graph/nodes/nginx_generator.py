@@ -87,6 +87,7 @@ def _infer_backend_port(services: list[dict[str, Any]]) -> int:
 
 def _default_nginx_conf(services: list[dict[str, Any]]) -> str:
     frontend_port = _infer_frontend_port(services)
+    default_csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https: ws: wss:;"
 
     return (
         "events { worker_connections 1024; }\n\n"
@@ -96,7 +97,7 @@ def _default_nginx_conf(services: list[dict[str, Any]]) -> str:
         "    server_name _;\n\n"
         "    add_header X-Content-Type-Options \"nosniff\" always;\n"
         "    add_header X-Frame-Options \"SAMEORIGIN\" always;\n"
-        "    add_header Content-Security-Policy \"default-src 'self'\" always;\n\n"
+        f"    add_header Content-Security-Policy \"{default_csp}\" always;\n\n"
         "    location / {\n"
         f"      proxy_pass http://localhost:{frontend_port};\n"
         "      proxy_http_version 1.1;\n"
@@ -160,15 +161,7 @@ def _repair_nginx_output(content: str, services: list[dict[str, Any]]) -> str:
         repaired,
     )
 
-    # Normalize CSP to a safe baseline if the model emits permissive directives.
-    permissive_markers = ("'unsafe-inline'", '"unsafe-inline"', "'unsafe-eval'", '"unsafe-eval"')
-    lowered = repaired.lower()
-    if "content-security-policy" in lowered and any(marker in lowered for marker in permissive_markers):
-        repaired = re.sub(
-            r'(?im)^\s*add_header\s+Content-Security-Policy\s+"[^"]*"\s+always\s*;\s*$',
-            '    add_header Content-Security-Policy "default-src \'self\'" always;',
-            repaired,
-        )
+    # Keep whatever CSP the model provides as long as the config structure is valid.
 
     return repaired.strip() + "\n"
 
@@ -272,7 +265,7 @@ Rules:
 - Add `/ws` only when websocket behavior is indicated.
 - Assume nginx runs on the host OS (outside compose), so use localhost upstreams (for example `proxy_pass http://localhost:3000`).
 - Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
-- Keep Content-Security-Policy strict by default; do NOT use `unsafe-inline` or `unsafe-eval` unless the repo evidence explicitly requires it.
+- Keep Content-Security-Policy practical for modern frontends (allow `unsafe-inline` for scripts/styles when needed).
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers.
 - Output ONLY nginx config, no markdown wrappers.
@@ -297,7 +290,7 @@ Improve the baseline config using these rules:
 - Add `/ws` only when websocket behavior is indicated.
 - Assume nginx runs on the host OS (outside compose), so use localhost upstreams (for example `proxy_pass http://localhost:3000`).
 - Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
-- Keep Content-Security-Policy strict by default; do NOT use `unsafe-inline` or `unsafe-eval` unless the repo evidence explicitly requires it.
+- Keep Content-Security-Policy practical for modern frontends (allow `unsafe-inline` for scripts/styles when needed).
 - Include proper proxy headers (X-Real-IP, X-Forwarded-For).
 - For WebSocket services, include proper upgrade headers (Connection, Upgrade).
 - Output ONLY nginx config, no markdown wrappers.
