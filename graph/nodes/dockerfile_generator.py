@@ -33,6 +33,21 @@ def _normalize_ctx(path: str) -> str:
     return normalized or "."
 
 
+def _get_dockerfile_path(build_context: str) -> str:
+    """Generate the dockerfile path from build context.
+    
+    Examples:
+    - "." -> "Dockerfile"
+    - "" -> "Dockerfile"
+    - "client" -> "client/Dockerfile"
+    - "./client" -> "client/Dockerfile"
+    """
+    normalized = _normalize_ctx(build_context)
+    if normalized in (".", ""):
+        return "Dockerfile"
+    return f"{normalized}/Dockerfile"
+
+
 def _strip_healthcheck_instructions(content: str) -> str:
     """Remove HEALTHCHECK instructions (including multi-line continuations)."""
     if not content:
@@ -364,6 +379,7 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         build_ctx = service["build_context"]
         port = service["port"]
         dockerfile_path = service.get("dockerfile_path", "")
+        dockerfile_key = _get_dockerfile_path(build_ctx)  # Generate the path key for storage
         available_scripts = _extract_package_scripts(key_files, build_ctx)
         command_hints = command_map.get(svc_name, {}) if isinstance(command_map, dict) else {}
         if not isinstance(command_hints, dict):
@@ -511,10 +527,10 @@ Improve the baseline Dockerfile using these rules:
                 key_files=repair_key_files,
                 available_scripts=available_scripts,
             )
-            dockerfiles[svc_name] = dockerfile
+            dockerfiles[dockerfile_key] = dockerfile
         except Exception as e:
             warnings.append(f"llm_refine_failed:{svc_name}:{e}")
-            dockerfiles[svc_name] = baseline_dockerfile
+            dockerfiles[dockerfile_key] = baseline_dockerfile
     
     state["dockerfiles"] = dockerfiles
     if warnings:

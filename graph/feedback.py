@@ -18,6 +18,24 @@ from .nodes.llm_config import (
 from .nodes.verifier import VerifierOutput, run_hadolint
 
 
+def _get_dockerfile_path(build_context: str) -> str:
+    """Generate the dockerfile path from build context.
+    
+    Examples:
+    - "." -> "Dockerfile"
+    - "" -> "Dockerfile"
+    - "client" -> "client/Dockerfile"
+    - "./client" -> "client/Dockerfile"
+    """
+    normalized = (build_context or ".").replace("\\", "/").strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized or "."
+    if normalized in (".", ""):
+        return "Dockerfile"
+    return f"{normalized}/Dockerfile"
+
+
 class ChangeInstruction(BaseModel):
     artifact_type: Literal["dockerfile", "compose", "nginx"]
     service_name: str = ""
@@ -35,11 +53,11 @@ def _default_plan(state: Dict[str, Any], reason: str) -> List[ChangeInstruction]
     dockerfiles = state.get("dockerfiles", {})
     plan: List[ChangeInstruction] = []
 
-    for svc_name in dockerfiles.keys():
+    for dockerfile_path in dockerfiles.keys():
         plan.append(
             ChangeInstruction(
                 artifact_type="dockerfile",
-                service_name=svc_name,
+                service_name=dockerfile_path,
                 should_change=True,
                 instructions=f"Coordinator fallback ({reason}): Apply feedback safely. Feedback: {feedback}",
             )
@@ -121,8 +139,10 @@ CURRENT DOCKER-COMPOSE:
 CURRENT NGINX:
 {nginx_conf}
 
-Return a structured plan with one dockerfile instruction per service, plus one each for compose and nginx.
-Set should_change=false when a file does not need modification.
+Return a structured plan. For each dockerfile in CURRENT DOCKERFILES:
+- Output one instruction with artifact_type="dockerfile" and service_name set to the dockerfile path (e.g. "client/Dockerfile" or "Dockerfile")
+- Set should_change=false when a file does not need modification.
+Also output one instruction each for compose and nginx.
 Keep instructions concise, actionable, and file-specific.
 """
 

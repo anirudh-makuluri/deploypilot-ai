@@ -258,8 +258,8 @@ def test_build_artifact_summary_includes_nginx_and_combined():
 def test_build_generated_artifact_scores_handles_generated_content():
     generated = {
         "dockerfiles": {
-            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
-            "api": "FROM python:3.12-slim\nUSER app\nEXPOSE 8000\nHEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1",
+            "Dockerfile": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+            "api/Dockerfile": "FROM python:3.12-slim\nUSER app\nEXPOSE 8000\nHEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1",
         },
         "docker_compose": """
 services:
@@ -327,8 +327,8 @@ def test_build_generated_artifact_scores_uses_runtime_tokens_for_multi_service()
             {"name": "web", "build_context": "apps/web", "port": 3000},
         ],
         "dockerfiles": {
-            "backend": "FROM node:20-alpine\nUSER node\nEXPOSE 5000\nHEALTHCHECK CMD wget -qO- http://localhost:5000 || exit 1",
-            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+            "apps/backend/Dockerfile": "FROM node:20-alpine\nUSER node\nEXPOSE 5000\nHEALTHCHECK CMD wget -qO- http://localhost:5000 || exit 1",
+            "apps/web/Dockerfile": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
         },
         "docker_compose": "",
         "nginx_conf": "",
@@ -353,7 +353,7 @@ def test_build_generated_artifact_scores_filters_framework_tokens_for_single_ser
     generated = {
         "services": [{"name": "web", "build_context": "apps/web", "port": 3000}],
         "dockerfiles": {
-            "web": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
+            "Dockerfile": "FROM node:20-alpine\nUSER node\nEXPOSE 3000\nHEALTHCHECK CMD wget -qO- http://localhost:3000 || exit 1",
         },
         "docker_compose": "",
         "nginx_conf": "",
@@ -365,7 +365,7 @@ def test_build_generated_artifact_scores_filters_framework_tokens_for_single_ser
 
     scores = _build_generated_artifact_scores(generated, label)
 
-    assert scores["dockerfile"]["per_service"]["web"]["criteria_scores"]["stack_alignment"] == 1.0, (
+    assert scores["dockerfile"]["per_service"]["apps/web/Dockerfile"]["criteria_scores"]["stack_alignment"] == 1.0, (
         "react is a framework token and should not be required in the Dockerfile"
     )
 

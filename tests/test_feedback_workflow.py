@@ -49,13 +49,13 @@ def base_cached_result():
         "commit_sha": "abc123",
         "stack_summary": "Python API",
         "services": [{"name": "api", "build_context": ".", "port": 8000}],
-        "dockerfiles": {"api": "FROM python:3.11-slim\nEXPOSE 8000\n"},
+        "dockerfiles": {"Dockerfile": "FROM python:3.11-slim\nEXPOSE 8000\n"},
         "docker_compose": "services:\n  api:\n    build: .\n    ports:\n      - \"8000:8000\"\n",
         "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
         "has_existing_dockerfiles": False,
         "has_existing_compose": False,
         "risks": ["Missing HEALTHCHECK"],
-        "hadolint_results": {"api": "DL3008 warning"},
+        "hadolint_results": {"Dockerfile": "DL3008 warning"},
     }
 
 
@@ -106,7 +106,7 @@ def test_coordinator_targets_only_nginx(monkeypatch, base_cached_result):
 
 def test_coordinator_targets_only_dockerfile(monkeypatch, base_cached_result):
     plan = [
-        ChangeInstruction(artifact_type="dockerfile", service_name="api", should_change=True, instructions="Add HEALTHCHECK"),
+        ChangeInstruction(artifact_type="dockerfile", service_name="Dockerfile", should_change=True, instructions="Add HEALTHCHECK"),
         ChangeInstruction(artifact_type="compose", service_name="", should_change=False, instructions=""),
         ChangeInstruction(artifact_type="nginx", service_name="", should_change=False, instructions=""),
     ]
@@ -120,14 +120,14 @@ def test_coordinator_targets_only_dockerfile(monkeypatch, base_cached_result):
 
     out = run_feedback_improvement(base_cached_result, "add healthcheck")
 
-    assert out["dockerfiles"]["api"] != base_cached_result["dockerfiles"]["api"]
+    assert out["dockerfiles"]["Dockerfile"] != base_cached_result["dockerfiles"]["Dockerfile"]
     assert out["docker_compose"] == base_cached_result["docker_compose"]
     assert out["nginx_conf"] == base_cached_result["nginx_conf"]
 
 
 def test_coordinator_targets_all(monkeypatch, base_cached_result):
     plan = [
-        ChangeInstruction(artifact_type="dockerfile", service_name="api", should_change=True, instructions="Change base image"),
+        ChangeInstruction(artifact_type="dockerfile", service_name="Dockerfile", should_change=True, instructions="Change base image"),
         ChangeInstruction(artifact_type="compose", service_name="", should_change=True, instructions="Add env"),
         ChangeInstruction(artifact_type="nginx", service_name="", should_change=True, instructions="Add /api route"),
     ]
@@ -141,7 +141,7 @@ def test_coordinator_targets_all(monkeypatch, base_cached_result):
 
     out = run_feedback_improvement(base_cached_result, "do all changes")
 
-    assert out["dockerfiles"]["api"] != base_cached_result["dockerfiles"]["api"]
+    assert out["dockerfiles"]["Dockerfile"] != base_cached_result["dockerfiles"]["Dockerfile"]
     assert out["docker_compose"] != base_cached_result["docker_compose"]
     assert out["nginx_conf"] != base_cached_result["nginx_conf"]
 

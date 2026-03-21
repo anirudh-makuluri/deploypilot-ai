@@ -205,7 +205,7 @@ def test_analyze_success_without_supabase(monkeypatch):
             "commit_sha": "sha-1",
             "detected_stack": "FastAPI",
             "services": [{"name": "api", "build_context": ".", "port": 8000}],
-            "dockerfiles": {"api": "FROM python:3.11"},
+            "dockerfiles": {"Dockerfile": "FROM python:3.11"},
             "risks": ["none"],
             "confidence": 0.8,
         },
@@ -485,7 +485,7 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
             "planner": {
                 "detected_stack": "FastAPI",
                 "services": [{"name": "api", "build_context": ".", "port": 8000}],
-                "dockerfiles": {"api": "FROM python:3.11"},
+                "dockerfiles": {"Dockerfile": "FROM python:3.11"},
                 "risks": ["none"],
                 "confidence": 0.9,
             }
@@ -561,7 +561,7 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
                 "commit_sha": "sha-1",
                 "detected_stack": "FastAPI",
                 "services": [{"name": "api", "build_context": ".", "port": 8000}],
-                "dockerfiles": {"api": "FROM python:3.12"},
+                "dockerfiles": {"Dockerfile": "FROM python:3.12"},
                 "docker_compose": "services:\n  api:\n    build: .\n",
                 "nginx_conf": "events {}\nhttp { server { listen 80; } }\n",
                 "has_existing_dockerfiles": False,

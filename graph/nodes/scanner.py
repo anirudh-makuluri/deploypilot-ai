@@ -11,6 +11,21 @@ def _normalize_package_path(path: str) -> str:
     return normalized or "."
 
 
+def _get_dockerfile_path(build_context: str) -> str:
+    """Generate the dockerfile path from build context.
+    
+    Examples:
+    - "." -> "Dockerfile"
+    - "" -> "Dockerfile"
+    - "client" -> "client/Dockerfile"
+    - "./client" -> "client/Dockerfile"
+    """
+    normalized = _normalize_package_path(build_context)
+    if normalized in (".", ""):
+        return "Dockerfile"
+    return f"{normalized}/Dockerfile"
+
+
 def _path_is_within(service_path: str, package_path: str) -> bool:
     """Return True when service_path is package_path or a descendant of it."""
     service_norm = _normalize_package_path(service_path)
@@ -42,24 +57,25 @@ def _filter_cached_response_for_package(cached: Dict[str, Any], package_path: st
     if not filtered_services:
         return None
 
-    service_names = {
-        svc.get("name")
+    # Build a set of dockerfile paths for the filtered services
+    dockerfile_paths = {
+        _get_dockerfile_path(svc.get("build_context", "."))
         for svc in filtered_services
-        if isinstance(svc, dict) and svc.get("name")
+        if isinstance(svc, dict)
     }
 
     dockerfiles = cached.get("dockerfiles", {})
     filtered_dockerfiles = {
-        name: content
-        for name, content in dockerfiles.items()
-        if name in service_names
+        path: content
+        for path, content in dockerfiles.items()
+        if path in dockerfile_paths
     } if isinstance(dockerfiles, dict) else {}
 
     hadolint_results = cached.get("hadolint_results", {})
     filtered_hadolint = {
-        name: result
-        for name, result in hadolint_results.items()
-        if name in service_names
+        path: result
+        for path, result in hadolint_results.items()
+        if path in dockerfile_paths
     } if isinstance(hadolint_results, dict) else {}
 
     projected = dict(cached)
