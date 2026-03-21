@@ -27,6 +27,96 @@ def _indent(text: str, prefix: str = "  ") -> str:
     return "\n".join(f"{prefix}{line}" if line.strip() else line for line in lines)
 
 
+def _extract_location_block(content: str, location_start: int) -> tuple[int, int] | None:
+    """Return [start, end) byte offsets for a location block starting at location_start."""
+    open_brace = content.find("{", location_start)
+    if open_brace == -1:
+        return None
+
+    depth = 0
+    for idx in range(open_brace, len(content)):
+        ch = content[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return location_start, idx + 1
+    return None
+
+
+def _remove_ws_location_blocks(content: str) -> str:
+    """Remove explicit /ws nginx location blocks when websocket routing is not required."""
+    pattern = re.compile(r"(?im)^\s*location\s+(?:=\s*)?/ws(?:/|\b)")
+    search_from = 0
+    result = content
+
+    while True:
+        match = pattern.search(result, search_from)
+        if not match:
+            break
+        block_span = _extract_location_block(result, match.start())
+        if not block_span:
+            search_from = match.end()
+            continue
+        block_start, block_end = block_span
+        result = result[:block_start] + result[block_end:]
+        search_from = block_start
+
+    return result
+
+
+def _infer_route_flags(scan: Dict[str, Any], services: list[dict[str, Any]]) -> tuple[bool, bool, bool]:
+    """Infer backend presence and whether /api or /ws routes should be generated."""
+    key_files = scan.get("key_files", {})
+    if not isinstance(key_files, dict):
+        key_files = {}
+
+    service_names = [str(s.get("name", "")).lower() for s in services if isinstance(s, dict)]
+    service_tokens = {
+        token
+        for name in service_names
+        for token in re.split(r"[^a-z0-9]+", name)
+        if token
+    }
+    has_backend_service = any(token in service_tokens for token in ("api", "backend", "server"))
+
+    api_markers = [
+        "app.use('/api",
+        'app.use("/api',
+        "router.prefix('/api",
+        'router.prefix("/api',
+        "@requestmapping(\"/api",
+        "@requestmapping('/api",
+        "path=\"/api",
+        "path='/api",
+        "location /api",
+        "next_public_api",
+    ]
+
+    all_content = "\n".join(
+        str(content).lower()
+        for content in key_files.values()
+        if isinstance(content, str)
+    )
+
+    ws_patterns = [
+        r"\bsocket\.io\b",
+        r"\bwebsocket(s)?\b",
+        r"\bws://",
+        r"\bwss://",
+        r"location\s+(?:=\s*)?/ws(?:/|\b)",
+        r"[\"']/(ws|socket)(?:/|[\"'])",
+    ]
+
+    has_ws_evidence = any(re.search(pattern, all_content, re.IGNORECASE) for pattern in ws_patterns) or any(
+        token in service_tokens for token in ("ws", "socket", "websocket")
+    )
+    has_api_prefix_evidence = any(marker in all_content for marker in api_markers)
+
+    return has_backend_service, has_api_prefix_evidence, has_ws_evidence
+
+
 def _infer_frontend_port(services: list[dict[str, Any]]) -> int:
     for svc in services:
         if not isinstance(svc, dict):
@@ -113,7 +203,7 @@ def _default_nginx_conf(services: list[dict[str, Any]]) -> str:
     )
 
 
-def _repair_nginx_output(content: str, services: list[dict[str, Any]]) -> str:
+def _repair_nginx_output(content: str, services: list[dict[str, Any]], include_ws: bool = True) -> str:
     """Best-effort normalization to enforce basic nginx config structure."""
     if not content or not content.strip():
         return _default_nginx_conf(services)
@@ -161,6 +251,9 @@ def _repair_nginx_output(content: str, services: list[dict[str, Any]]) -> str:
         repaired,
     )
 
+    if not include_ws:
+        repaired = _remove_ws_location_blocks(repaired)
+
     # Keep whatever CSP the model provides as long as the config structure is valid.
 
     return repaired.strip() + "\n"
@@ -168,44 +261,7 @@ def _repair_nginx_output(content: str, services: list[dict[str, Any]]) -> str:
 
 def _infer_route_guidance(scan: Dict[str, Any], services: list[dict[str, Any]]) -> str:
     """Infer whether /api and /ws routes are likely required based on scan evidence."""
-    key_files = scan.get("key_files", {})
-    if not isinstance(key_files, dict):
-        key_files = {}
-
-    service_names = [str(s.get("name", "")).lower() for s in services if isinstance(s, dict)]
-    has_backend_service = any(
-        token in name
-        for name in service_names
-        for token in ("api", "backend", "server")
-    )
-
-    ws_markers = ["socket.io", "websocket", "/ws", "ws://", "wss://", "proxy_set_header upgrade"]
-    api_markers = [
-        "app.use('/api",
-        'app.use("/api',
-        "router.prefix('/api",
-        'router.prefix("/api',
-        "@requestmapping(\"/api",
-        "@requestmapping('/api",
-        "path=\"/api",
-        "path='/api",
-        "location /api",
-        "next_public_api",
-    ]
-
-    all_content = "\n".join(
-        str(content).lower()
-        for content in key_files.values()
-        if isinstance(content, str)
-    )
-
-    has_ws_evidence = any(marker in all_content for marker in ws_markers) or any(
-        token in name for name in service_names for token in ("ws", "socket")
-    )
-    has_api_prefix_evidence = any(marker in all_content for marker in api_markers)
-
-    include_api = has_api_prefix_evidence
-    include_ws = has_ws_evidence
+    has_backend_service, include_api, include_ws = _infer_route_flags(scan, services)
 
     return (
         "ROUTE DECISION GUIDANCE (derived from repo evidence):\n"
@@ -236,9 +292,10 @@ def nginx_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         for s in services
     ])
     route_guidance = _infer_route_guidance(scan, services)
+    _, _, include_ws = _infer_route_flags(scan, services)
     
     baseline_nginx = existing_nginx if isinstance(existing_nginx, str) and existing_nginx.strip() else _default_nginx_conf(services)
-    baseline_nginx = _repair_nginx_output(baseline_nginx, services)
+    baseline_nginx = _repair_nginx_output(baseline_nginx, services, include_ws=include_ws)
 
     if existing_nginx:
         prompt = f"""
@@ -307,7 +364,7 @@ Improve the baseline config using these rules:
         nginx_conf = strip_markdown_wrapper(response.content, lang="nginx")
         if nginx_conf.startswith("conf\n"):
             nginx_conf = nginx_conf[5:]
-        nginx_conf = _repair_nginx_output(nginx_conf, services)
+        nginx_conf = _repair_nginx_output(nginx_conf, services, include_ws=include_ws)
         state["nginx_conf"] = nginx_conf
         state["nginx_retry_attempts"] = attempts_used
         state["nginx_fallback_used"] = fallback_used
