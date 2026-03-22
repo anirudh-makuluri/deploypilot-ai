@@ -103,23 +103,12 @@ def _pick_best_cached_response(cached_rows: list, requested_package_path: str) -
                 return candidate
         return candidates[0]
 
-    # For package requests, prefer a full-repo cache so we can project precisely.
-    for candidate in candidates:
-        if _normalize_package_path(candidate.get("_cache_package_path", "")) == ".":
-            projected = _filter_cached_response_for_package(candidate, requested_norm)
-            if projected:
-                return projected
-
-    # Next prefer exact package cache match.
+    # For package requests, only return an exact package cache match.
+    # Reusing full-repo cache rows here can leak repo-wide analysis details
+    # (for example stack summary/tokens/risks) into package-scoped requests.
     for candidate in candidates:
         if _normalize_package_path(candidate.get("_cache_package_path", "")) == requested_norm:
             return candidate
-
-    # Backward compatibility: old cache entries without package metadata.
-    for candidate in candidates:
-        projected = _filter_cached_response_for_package(candidate, requested_norm)
-        if projected:
-            return projected
 
     return None
 
