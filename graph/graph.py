@@ -39,9 +39,25 @@ def check_planner_error(state: Dict[str, Any]) -> str:
 def check_compose_required(state: Dict[str, Any]) -> str:
     """Generate compose only when there are multiple app services."""
     services = state.get("services")
-    if isinstance(services, list) and len(services) > 1:
-        return "compose"
-    return "skip"
+    if not isinstance(services, list) or len(services) <= 1:
+        return "skip"
+        
+    package_path = state.get("package_path", ".")
+    from graph.nodes.planner import _normalize_ctx
+    package_norm = _normalize_ctx(package_path)
+    
+    # If all services share the exact same expected container logic path, and it's an explicit 
+    # sub-package deploy, we don't need compose - it's a single container.
+    if package_norm != ".":
+        all_same_context = all(
+            _normalize_ctx(svc.get("build_context", ".")) == package_norm or 
+            (_normalize_ctx(svc.get("dockerfile_path", "")) and _normalize_ctx(svc.get("dockerfile_path", "")).startswith(package_norm))
+            for svc in services
+        )
+        if all_same_context:
+            return "skip"
+            
+    return "compose"
 
 
 # Entry point

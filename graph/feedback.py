@@ -63,14 +63,16 @@ def _default_plan(state: Dict[str, Any], reason: str) -> List[ChangeInstruction]
             )
         )
 
-    plan.append(
-        ChangeInstruction(
-            artifact_type="compose",
-            service_name="",
-            should_change=True,
-            instructions=f"Coordinator fallback ({reason}): Apply feedback safely. Feedback: {feedback}",
+    services = state.get("services", [])
+    if isinstance(services, list) and len(services) > 1:
+        plan.append(
+            ChangeInstruction(
+                artifact_type="compose",
+                service_name="",
+                should_change=True,
+                instructions=f"Coordinator fallback ({reason}): Apply feedback safely. Feedback: {feedback}",
+            )
         )
-    )
     plan.append(
         ChangeInstruction(
             artifact_type="nginx",
@@ -108,6 +110,19 @@ def feedback_coordinator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     prior_risks = state.get("prior_risks", [])
     prior_hadolint = state.get("prior_hadolint_results", {})
     feedback = state.get("feedback", "")
+    feedback_history = state.get("prior_feedbacks", [])
+    
+    # Simple regression heuristic: if the exact same feedback was already submitted twice,
+    # or the user has hit the loop guard, restrict changes.
+    feedback_round = state.get("feedback_round", 1)
+    if feedback_round >= 4:
+        state["change_plan"] = _default_plan(state, "Max feedback iterations reached. Generating safe fallback.")
+        state["coordinator_summary"] = "Max iterations reached. Falling back."
+        return state
+
+    history_context = ""
+    if feedback_history:
+        history_context = "PREVIOUS FEEDBACK ROUNDS:\n" + "\n".join(f"- Round {i+1}: {fb}" for i, fb in enumerate(feedback_history)) + "\n\nCRITICAL: Do NOT undo previous fixes. Address the NEW feedback while keeping old fixes intact."
 
     prompt = f"""
 You are a coordinator agent for deployment artifact remediation.
@@ -139,10 +154,12 @@ CURRENT DOCKER-COMPOSE:
 CURRENT NGINX:
 {nginx_conf}
 
+{history_context}
+
 Return a structured plan. For each dockerfile in CURRENT DOCKERFILES:
 - Output one instruction with artifact_type="dockerfile" and service_name set to the dockerfile path (e.g. "client/Dockerfile" or "Dockerfile")
 - Set should_change=false when a file does not need modification.
-Also output one instruction each for compose and nginx.
+Also output one instruction each for compose and nginx. (If the repo only has ONE service in SERVICES, set should_change=false for compose).
 Keep instructions concise, actionable, and file-specific.
 """
 
@@ -396,10 +413,12 @@ def build_feedback_initial_state(cached_result: Dict[str, Any], feedback: str) -
         "has_existing_compose": cached_result.get("has_existing_compose", False),
         "prior_risks": list(cached_result.get("risks", [])),
         "prior_hadolint_results": dict(cached_result.get("hadolint_results", {})),
+        "prior_feedbacks": list(cached_result.get("prior_feedbacks", [])),
+        "feedback_round": cached_result.get("feedback_round", 0) + 1,
     }
 
 def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    out = {
         "commit_sha": result.get("commit_sha", "unknown"),
         "stack_summary": result.get("detected_stack", "unknown"),
         "stack_tokens": result.get("stack_tokens", []),
@@ -412,7 +431,14 @@ def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "risks": result.get("risks", []),
         "confidence": result.get("confidence", 0.5),
         "hadolint_results": result.get("hadolint_results", {}),
+        "feedback_round": result.get("feedback_round", 1),
     }
+    prior_feedbacks = list(result.get("prior_feedbacks", []))
+    current_feedback = result.get("feedback")
+    if current_feedback and current_feedback not in prior_feedbacks:
+        prior_feedbacks.append(current_feedback)
+    out["prior_feedbacks"] = prior_feedbacks
+    return out
 
 
 def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Dict[str, Any]:

@@ -376,18 +376,19 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
 
         if monorepo_root_build:
             build = entry.get("build")
+            target_df = dockerfile_path or f"{_normalize_path(str(svc.get('build_context', '.') or '.'))}/Dockerfile"
             if isinstance(build, str):
                 entry["build"] = {
                     "context": ".",
-                    "dockerfile": dockerfile_path or f"{_normalize_path(str(svc.get('build_context', '.') or '.'))}/Dockerfile",
+                    "dockerfile": target_df,
                 }
                 changed = True
             elif isinstance(build, dict):
                 if build.get("context") != ".":
                     build["context"] = "."
                     changed = True
-                if dockerfile_path and build.get("dockerfile") != dockerfile_path:
-                    build["dockerfile"] = dockerfile_path
+                if build.get("dockerfile") != target_df:
+                    build["dockerfile"] = target_df
                     changed = True
 
         if port_int:

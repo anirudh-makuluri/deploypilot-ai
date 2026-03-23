@@ -92,7 +92,13 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         build_ctx = str(service.get("build_context", ".") or ".")
-        normalized_ctx = _normalize_ctx(build_ctx)
+        dockerfile_path = str(service.get("dockerfile_path", "") or "").strip()
+        
+        logical_ctx = build_ctx
+        if build_ctx == "." and dockerfile_path and "/" in dockerfile_path:
+            logical_ctx = "/".join(dockerfile_path.split("/")[:-1])
+            
+        normalized_ctx = _normalize_ctx(logical_ctx)
         scripts = set(_extract_package_scripts(key_files, normalized_ctx))
 
         lock_path = "pnpm-lock.yaml" if normalized_ctx == "." else f"{normalized_ctx}/pnpm-lock.yaml"
@@ -129,12 +135,14 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             single = services[0]
         if single:
             svc_name = str(single.get("name", "app") or "app")
+            df_path = str(single.get("dockerfile_path", "")).strip()
+            df_flag = f" -f {df_path}" if df_path and df_path != "Dockerfile" else ""
             try:
                 svc_port = int(single.get("port"))
             except (TypeError, ValueError):
                 svc_port = 8000
             global_commands.extend([
-                f"docker build -t {svc_name}:latest .",
+                f"docker build -t {svc_name}:latest{df_flag} .",
                 f"docker run --rm -p {svc_port}:{svc_port} {svc_name}:latest",
             ])
 

@@ -63,6 +63,23 @@ def _dedupe_services_by_context(services: List[ServiceInfo]) -> List[ServiceInfo
     return deduped
 
 
+def _filter_services_to_package_scope(services: List[ServiceInfo], package_path: str) -> List[ServiceInfo]:
+    """Filter services to only include those that are within the queried package_path scope."""
+    package_norm = _normalize_ctx(package_path)
+    if package_norm == ".":
+        return services
+        
+    filtered = []
+    prefix = package_norm + "/"
+    for svc in services:
+        svc_ctx = _normalize_ctx(svc.build_context)
+        # Keep the service if it matches the package path exactly or is a sub-directory
+        if svc_ctx == package_norm or svc_ctx.startswith(prefix):
+            filtered.append(svc)
+            
+    return filtered
+
+
 def _apply_per_service_port_refinement(
     services: List[ServiceInfo],
     repo_url: str,
@@ -330,6 +347,40 @@ def _detect_workspace_sub_packages(scan: Dict[str, Any], package_path: str) -> L
     return sorted(sub_pkg_dirs)
 
 
+def _elevate_services_for_monorepo(
+    services: list,
+    scan: Dict[str, Any],
+    package_path: str,
+) -> list:
+    """For workspace monorepos, elevate nested service build contexts to the repo root.
+    
+    This ensures Docker can access root-level lockfiles (pnpm-lock.yaml, etc.).
+    The original nested path is preserved in dockerfile_path.
+    """
+    workspace_sub_packages = _detect_workspace_sub_packages(scan, package_path)
+    if not workspace_sub_packages:
+        return services
+    
+    elevated = []
+    for svc in services:
+        if isinstance(svc, dict):
+            ctx_norm = _normalize_ctx(svc.get("build_context", "."))
+            if ctx_norm != ".":
+                if not svc.get("dockerfile_path"):
+                    svc["dockerfile_path"] = f"{ctx_norm}/Dockerfile"
+                svc["build_context"] = "."
+            elevated.append(svc)
+        else:
+            # ServiceInfo object
+            ctx_norm = _normalize_ctx(svc.build_context)
+            if ctx_norm != ".":
+                if not svc.dockerfile_path:
+                    svc.dockerfile_path = f"{ctx_norm}/Dockerfile"
+                svc.build_context = "."
+            elevated.append(svc)
+    return elevated
+
+
 def _apply_deterministic_fallback(
     state: Dict[str, Any],
     scan: Dict[str, Any],
@@ -376,14 +427,17 @@ def _apply_deterministic_fallback(
 
     state["stack_tokens"] = combined_stack_tokens
     state["detected_stack"] = render_stack_summary(combined_stack_tokens)
-    state["services"] = [
-        ServiceInfo(
-            name=fallback_name,
-            build_context=fallback_build_context,
-            port=fallback_port,
-            dockerfile_path="",
-        ).model_dump()
-    ]
+    
+    svc = ServiceInfo(
+        name=fallback_name,
+        build_context=fallback_build_context,
+        port=fallback_port,
+        dockerfile_path="",
+    )
+    services_list = [svc.model_dump()]
+    services_list = _elevate_services_for_monorepo(services_list, scan, package_path)
+    state["services"] = services_list
+    
     state["has_existing_dockerfiles"] = _scan_has_existing_dockerfiles(scan)
     state["has_existing_compose"] = _scan_has_existing_compose(scan)
     state["planner_used_deterministic_fallback"] = True
@@ -438,6 +492,11 @@ IMPORTANT: This is a workspace monorepo. You MUST:
   3. Exclude any packages with mobile markers (mobile, android, ios, expo, react-native, flutter).
   4. For each remaining package, infer its name and port from its contents in key_files.
 """
+
+    if _normalize_ctx(package_path) != ".":
+        monorepo_context += f"\nCRITICAL: The user has requested deployment specifically for the sub-package '{package_path}'. " \
+                            f"Ensure you plan a service for '{package_path}'. You may also plan other services if they are clearly required dependencies, " \
+                            f"but do not blindly plan every workspace package if they are unrelated to '{package_path}'."
 
     allowed_stack_tokens = ", ".join(sorted(KNOWN_STACK_TOKENS))
 
@@ -532,6 +591,7 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             s for s in data.services 
             if not _is_mobile_service(s, scan) and not _is_infrastructure_service(s)
         ]
+        filtered_services = _filter_services_to_package_scope(filtered_services, package_path)
         filtered_services = _dedupe_services_by_context(filtered_services)
         if not filtered_services:
             if _apply_deterministic_fallback(
@@ -567,9 +627,15 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         
         combined_stack_tokens = normalize_stack_tokens([*data.stack_tokens, *extracted_stack_tokens])
 
+        # For workspace monorepos, docker requires the build context to be at the repo root
+        # so it can access the top-level lockfile (e.g., pnpm-lock.yaml). Elevate all nested
+        # services to the root building context, but explicitly define their nested dockerfile path.
+        final_services = [s.model_dump() for s in filtered_services]
+        final_services = _elevate_services_for_monorepo(final_services, scan, package_path)
+
         state["stack_tokens"] = combined_stack_tokens
         state["detected_stack"] = render_stack_summary(combined_stack_tokens)
-        state["services"] = [s.model_dump() for s in filtered_services]
+        state["services"] = final_services
         state["has_existing_dockerfiles"] = data.has_existing_dockerfiles
         state["has_existing_compose"] = data.has_existing_compose
         state["planner_retry_attempts"] = attempts_used

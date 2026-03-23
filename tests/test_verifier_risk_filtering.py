@@ -129,3 +129,44 @@ def test_filter_risks_drops_compose_env_placeholder_warning():
     risks = ["Docker-compose uses environment variables that are not explicitly defined in the file"]
     filtered = _filter_risks(risks, [{"name": "api", "port": 8000}], {"api": "FROM node:20"}, "services:\n  api:\n    environment:\n      - SECRET=${SECRET}", "")
     assert filtered == []
+
+
+def test_filter_risks_drops_missing_compose_warning_when_compose_not_required():
+    risks = ["docker-compose.yml is missing, but required for deployment"]
+    services = [
+        {"name": "web", "build_context": "apps/web", "port": 3000},
+        {"name": "web-worker", "build_context": "apps/web", "port": 3001},
+    ]
+
+    filtered = _filter_risks(
+        risks,
+        services,
+        {"web": "FROM node:20"},
+        docker_compose="",
+        nginx_conf="",
+        package_path="apps/web",
+    )
+
+    assert filtered == []
+
+
+def test_deterministic_confidence_does_not_penalize_missing_compose_when_not_required():
+    services = [
+        {"name": "web", "build_context": "apps/web", "port": 3000},
+        {"name": "web-worker", "build_context": "apps/web", "port": 3001},
+    ]
+    dockerfiles = {
+        "web": "FROM node:20-alpine\n",
+        "web-worker": "FROM node:20-alpine\n",
+    }
+
+    confidence = _compute_deterministic_confidence(
+        services,
+        dockerfiles,
+        docker_compose="",
+        nginx_conf="",
+        risks=[],
+        package_path="apps/web",
+    )
+
+    assert confidence == 0.99

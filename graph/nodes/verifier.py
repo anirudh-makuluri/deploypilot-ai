@@ -62,18 +62,44 @@ def _contains_backend_healthcheck(services: List[Dict[str, Any]], dockerfiles: D
     return False
 
 
+def _compose_required_for_services(services: List[Dict[str, Any]], package_path: str = ".") -> bool:
+    """Mirror compose routing logic so verifier expectations match generation behavior."""
+    if not isinstance(services, list) or len(services) <= 1:
+        return False
+
+    from graph.nodes.planner import _normalize_ctx
+
+    package_norm = _normalize_ctx(package_path)
+    if package_norm != ".":
+        all_same_context = all(
+            _normalize_ctx(svc.get("build_context", ".")) == package_norm
+            or (
+                _normalize_ctx(svc.get("dockerfile_path", ""))
+                and _normalize_ctx(svc.get("dockerfile_path", "")).startswith(package_norm)
+            )
+            for svc in services
+            if isinstance(svc, dict)
+        )
+        if all_same_context:
+            return False
+    return True
+
+
 def _filter_risks(
     risks: List[str],
     services: List[Dict[str, Any]],
     dockerfiles: Dict[str, str],
     docker_compose: str,
     nginx_conf: str,
+    package_path: str = ".",
 ) -> List[str]:
     """Drop generic/non-actionable verifier warnings when repo evidence contradicts them."""
     filtered: List[str] = []
     compose_lower = docker_compose.lower() if isinstance(docker_compose, str) else ""
+    compose_present = bool(compose_lower.strip())
     nginx_lower = nginx_conf.lower() if isinstance(nginx_conf, str) else ""
     compose_has_nginx_service = bool(re.search(r"(?im)^\s*nginx\s*:", compose_lower))
+    compose_required = _compose_required_for_services(services, package_path)
     has_stateful = any(
         _looks_stateful_service(str(svc.get("name", "")))
         for svc in services
@@ -85,6 +111,15 @@ def _filter_risks(
         text = str(risk or "").strip()
         lowered = text.lower()
         if not text:
+            continue
+
+        # Compose may be intentionally skipped for single-service/scope-local deploys.
+        if (
+            not compose_required
+            and not compose_present
+            and "compose" in lowered
+            and any(token in lowered for token in ("missing", "not provided", "not present", "absent", "required"))
+        ):
             continue
 
         # Generic hardening nits that are not required blockers for this project.
@@ -157,6 +192,7 @@ def _compute_deterministic_confidence(
     docker_compose: str,
     nginx_conf: str,
     risks: List[str],
+    package_path: str = ".",
 ) -> float:
     """Compute confidence from final artifacts and filtered risks without LLM score dependence."""
     service_list = [svc for svc in services if isinstance(svc, dict)]
@@ -185,8 +221,8 @@ def _compute_deterministic_confidence(
     if missing_ports:
         score -= min(0.15, 0.05 * missing_ports)
 
-    # Multi-service deployments should include compose.
-    if service_count > 1 and not (isinstance(docker_compose, str) and docker_compose.strip()):
+    # Compose should be present only when required by routing logic.
+    if _compose_required_for_services(service_list, package_path) and not (isinstance(docker_compose, str) and docker_compose.strip()):
         score -= 0.2
 
     # If frontend + backend style services are present, nginx should be generated.
@@ -215,6 +251,7 @@ def verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:
     dockerfiles = state.get("dockerfiles", {})
     docker_compose = state.get("docker_compose", "")
     nginx_conf = state.get("nginx_conf", "")
+    package_path = state.get("package_path", ".")
 
     hadolint_results = {}
     for service, content in dockerfiles.items():
@@ -268,7 +305,14 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             config=RETRY_CONFIGS["verifier"],
             node_name="verifier",
         )
-        filtered_risks = _filter_risks(result.risks, services, dockerfiles, docker_compose, nginx_conf)
+        filtered_risks = _filter_risks(
+            result.risks,
+            services,
+            dockerfiles,
+            docker_compose,
+            nginx_conf,
+            package_path=package_path,
+        )
         state["risks"] = filtered_risks
         state["confidence"] = _compute_deterministic_confidence(
             services=services,
@@ -276,6 +320,7 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             docker_compose=docker_compose,
             nginx_conf=nginx_conf,
             risks=filtered_risks,
+            package_path=package_path,
         )
         state["llm_confidence_raw"] = result.confidence
         state["hadolint_results"] = hadolint_results

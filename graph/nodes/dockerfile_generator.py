@@ -152,14 +152,25 @@ def _build_deterministic_dockerfile(
         else:
             maybe_build = "RUN npm run build\n"
 
+    deps_copy_commands = (
+        "COPY package*.json ./\n"
+        "COPY pnpm-lock.yaml* ./\n"
+        "COPY pnpm-workspace.yaml* ./\n"
+        "COPY yarn.lock* ./\n"
+    )
+    
+    # In a nested build context, the deps stage must have the nested package.json 
+    # to filter/install correctly. We copy it into the proper nested directory.
+    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
+    if build_ctx_norm != ".":
+        deps_copy_commands += f"COPY {build_ctx_norm}/package.json ./{build_ctx_norm}/package.json\n"
+
     return (
         "FROM node:20-alpine AS base\n"
         "WORKDIR /app\n"
         "RUN addgroup -S app && adduser -S app -G app\n\n"
         "FROM base AS deps\n"
-        "COPY package*.json ./\n"
-        "COPY pnpm-lock.yaml* ./\n"
-        "COPY yarn.lock* ./\n"
+        f"{deps_copy_commands}"
         f"RUN {install_cmd}\n\n"
         "FROM deps AS build\n"
         "COPY . .\n"
@@ -215,13 +226,25 @@ def _repair_dockerfile_output(
         copy_lines.append("COPY pnpm-lock.yaml* ./")
         if has_workspace_manifest:
             copy_lines.append("COPY pnpm-workspace.yaml* ./")
+        # We ensure the path to the workspace file exists by doing a specific copy, but
+        # because docker COPY fails if the target directory doesn't exist, we must mkdir it first.
+        copy_lines.append(f"RUN mkdir -p {build_ctx}")
         copy_lines.append(f"COPY {build_ctx}/package.json {build_ctx}/package.json")
         if has_workspace_packages:
             copy_lines.append("COPY packages ./packages")
 
         copy_block = "\n".join(copy_lines)
-        copy_pattern = rf"(?im)^\s*COPY\s+{re.escape(build_ctx)}/package\.json\s+pnpm-lock\.yaml\*\s+\./\s*$"
+        copy_pattern = rf"(?im)^\s*COPY\s+(?:{re.escape(build_ctx)}/package\.json\s+)?pnpm-lock\.yaml\*\s*(?:pnpm-workspace\.yaml\*\s*)?\./\s*$"
         new_fixed = re.sub(copy_pattern, copy_block, fixed)
+        
+        # fallback if pattern doesn't match the exact deterministic builder variant natively
+        if new_fixed == fixed and "node:20-alpine" in fixed:
+            new_fixed = re.sub(
+                r"(?im)^\s*COPY\s+package\*?\.json\s+\./\s*\n\s*COPY\s+pnpm-lock\.yaml\*\s+\./\s*\n\s*COPY\s+yarn\.lock\*\s+\./\s*\n(?:^\s*COPY\s+[\w/.-]+\s+[\w/.-]+\s*\n)*", 
+                copy_block + "\n", 
+                fixed
+            )
+            
         if new_fixed != fixed:
             fixed = new_fixed
             changed = True
@@ -231,6 +254,8 @@ def _repair_dockerfile_output(
         if new_fixed != fixed:
             fixed = new_fixed
             changed = True
+
+    scripts_set = {s.strip() for s in available_scripts}
 
     # Normalize workspace-name filters to path-based filters and remove accidental duplicates.
     if build_ctx != ".":
@@ -254,6 +279,33 @@ def _repair_dockerfile_output(
         if new_fixed != fixed:
             fixed = new_fixed
             changed = True
+            
+        # Detect Turborepo and use `turbo run build --filter=<service_dir>...`
+        has_turbo = isinstance(key_files, dict) and ("turbo.json" in key_files or "turbo.yaml" in key_files)
+        if has_turbo and ("build" in scripts_set or "turbo" in fixed.lower() or "pnpm run build" in fixed or "pnpm build" in fixed):
+            # Match standalone turbo commands
+            new_fixed = re.sub(
+                r"(?im)^\s*RUN\s+(?:npx\s+(?:--yes\s+)?)?turbo\s+(?:run\s+)?build\s*$", 
+                f"RUN npx --yes turbo run build --filter=./{build_ctx}...", 
+                fixed
+            )
+            # Match standalone pnpm/npm/yarn build commands
+            if new_fixed == fixed:
+                new_fixed = re.sub(
+                    r"(?im)^\s*RUN\s+(?:pnpm|npm|yarn)\s+(?:run\s+)?build\s*$", 
+                    f"RUN npx --yes turbo run build --filter=./{build_ctx}...", 
+                    fixed
+                )
+            # Match compound commands like: RUN corepack enable pnpm && pnpm run build
+            if new_fixed == fixed:
+                new_fixed = re.sub(
+                    r"(?im)(^\s*RUN\s+.+&&\s*)(?:pnpm|npm|yarn)\s+(?:run\s+)?build\s*$", 
+                    f"\\1npx --yes turbo run build --filter=./{build_ctx}...", 
+                    fixed
+                )
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
 
     # If workspace packages exist and deps stage installs via pnpm, include packages in deps context.
     if has_workspace_packages and "pnpm i --frozen-lockfile" in fixed and "COPY packages ./packages" not in fixed:
@@ -268,17 +320,15 @@ def _repair_dockerfile_output(
                 fixed = new_fixed
                 changed = True
 
-    scripts_set = {s.strip() for s in available_scripts}
-
     # Never swallow build failures with `|| true` in production Dockerfiles.
-    new_fixed = re.sub(r"(?im)^\s*RUN\s+pnpm\s+build\s*\|\|\s*true\s*$", "RUN pnpm build", fixed)
+    new_fixed = re.sub(r"(?im)^\s*RUN\s+((?:pnpm|npm|yarn)\s+(?:run\s+)?build)\s*\|\|\s*true\s*$", r"RUN \1", fixed)
     if new_fixed != fixed:
         fixed = new_fixed
         changed = True
 
     # If no build script exists, drop pnpm build line to avoid missing-script failures.
     if "build" not in scripts_set:
-        new_fixed = re.sub(r"(?im)^\s*RUN\s+pnpm\s+build\s*$\n?", "", fixed)
+        new_fixed = re.sub(r"(?im)^\s*RUN\s+(?:pnpm|npm|yarn)\s+(?:run\s+)?build\s*$\n?", "", fixed)
         if new_fixed != fixed:
             fixed = new_fixed
             changed = True
@@ -375,11 +425,15 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         warnings = []
     
     for service in services:
+        original_ctx = service.get("build_context", ".")
+        dockerfile_path = service.get("dockerfile_path", "")
+        if original_ctx == "." and dockerfile_path and "/" in dockerfile_path:
+            service["build_context"] = "/".join(dockerfile_path.split("/")[:-1])
+            
         svc_name = service["name"]
         build_ctx = service["build_context"]
         port = service["port"]
-        dockerfile_path = service.get("dockerfile_path", "")
-        dockerfile_key = _get_dockerfile_path(build_ctx)  # Generate the path key for storage
+        dockerfile_key = dockerfile_path or _get_dockerfile_path(build_ctx)
         available_scripts = _extract_package_scripts(key_files, build_ctx)
         command_hints = command_map.get(svc_name, {}) if isinstance(command_map, dict) else {}
         if not isinstance(command_hints, dict):
@@ -462,12 +516,13 @@ Rules:
 5. EXPOSE the correct port and DO NOT include HEALTHCHECK instructions.
 6. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
 7. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
-8. Only run `pnpm build` when a `build` script exists for this service.
-9. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
-10. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
-11. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-12. Do NOT include any preamble like 'IMPROVED Dockerfile:' or commentary. Return ONLY the raw Dockerfile.
-13. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
+8. If the repo uses Turborepo (`turbo.json`), use `npx turbo run build --filter=./<service_path>...` for building.
+9. Only run a build script when a `build` script exists for this service or Turborepo indicates it.
+10. If no `build` script exists and not using Turbo, do not run build; use a runtime command that matches available scripts/artifacts.
+11. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
+12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
+13. Do NOT include any preamble like 'IMPROVED Dockerfile:' or commentary. Return ONLY the raw Dockerfile.
+14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
         else:
             examples = fetch_reference_examples(
@@ -504,12 +559,13 @@ Improve the baseline Dockerfile using these rules:
 5. EXPOSE the port and DO NOT include HEALTHCHECK instructions.
 6. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
 7. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
-8. Only run `pnpm build` when a `build` script exists for this service.
-9. If no `build` script exists, do not run build; use a runtime command that matches available scripts/artifacts.
-10. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
-11. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-12. Do NOT include any preamble or commentary. Return ONLY the raw Dockerfile.
-13. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
+8. If the repo uses Turborepo (`turbo.json`), use `npx turbo run build --filter=./<service_path>...` for building.
+9. Only run a build script when a `build` script exists for this service or Turborepo indicates it.
+10. If no `build` script exists and not using Turbo, do not run build; use a runtime command that matches available scripts/artifacts.
+11. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
+12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
+13. Do NOT include any preamble or commentary. Return ONLY the raw Dockerfile.
+14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
 """
         
         try:
@@ -531,6 +587,8 @@ Improve the baseline Dockerfile using these rules:
         except Exception as e:
             warnings.append(f"llm_refine_failed:{svc_name}:{e}")
             dockerfiles[dockerfile_key] = baseline_dockerfile
+        finally:
+            service["build_context"] = original_ctx
     
     state["dockerfiles"] = dockerfiles
     if warnings:

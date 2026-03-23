@@ -40,5 +40,16 @@ def test_check_compose_required_skips_for_single_service_repo():
     assert check_compose_required(state) == "skip"
 
 
+def test_check_compose_required_skips_for_scoped_monorepo():
+    state = {
+        "package_path": "apps/web",
+        "services": [
+            {"name": "web", "build_context": "apps/web", "port": 3000},
+            {"name": "web-worker", "build_context": "apps/web", "port": 3001},
+        ]
+    }
+    assert check_compose_required(state) == "skip"
+
+
 def test_check_compose_required_skips_when_services_missing():
     assert check_compose_required({}) == "skip"
