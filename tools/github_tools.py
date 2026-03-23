@@ -155,6 +155,24 @@ def fetch_repo_structure_impl(repo_url: str, github_token: Optional[str] = None,
     ]
     key_files = {}
 
+    # When scanning a sub-package, also fetch root-level config files that are
+    # critical for monorepo/turbo detection. These aren't in the subtree.
+    if normalized_package_path != ".":
+        root_config_files = [
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "turbo.json",
+        ]
+        for root_file in root_config_files:
+            content_url = f"https://raw.githubusercontent.com/{repo}/{meta['default_branch']}/{root_file}"
+            try:
+                resp = requests.get(content_url, headers=headers)
+                if resp.status_code == 200:
+                    key_files[root_file] = resp.text[:10000]
+            except Exception:
+                pass
+
     count = 0
     limit = max_files if max_files is not None else 20
     for item in all_items:

@@ -4,6 +4,7 @@ import re
 from .llm_config import llm_docker, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
+from tools.template_store import match_template, fill_template
 
 
 def _extract_package_scripts(key_files: dict[str, Any], build_ctx: str) -> list[str]:
@@ -455,16 +456,78 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if dockerfile_path:
             existing_dockerfile = key_files.get(dockerfile_path)
         
-        baseline_dockerfile = (
-            existing_dockerfile
-            if isinstance(existing_dockerfile, str) and existing_dockerfile.strip()
-            else _build_deterministic_dockerfile(
+        # ─── Template-first flow ──────────────────────────────────────────
+        # 1. Try matching a Supabase template
+        # 2. Fall back to deterministic builder
+        # 3. Fall back to existing Dockerfile from repo
+        template_used = False
+        stack_tokens = list(state.get("stack_tokens", []))
+        
+        # Build signals for template matching — infer from key_files evidence
+        has_pnpm_lock = isinstance(key_files, dict) and "pnpm-lock.yaml" in key_files
+        has_workspace_yaml = isinstance(key_files, dict) and "pnpm-workspace.yaml" in key_files
+        is_monorepo = (
+            build_ctx != "."
+            or (original_ctx == "." and dockerfile_path and "/" in dockerfile_path)
+            or has_workspace_yaml
+        )
+        
+        # Detect Turborepo from turbo.json OR root package.json scripts containing "turbo"
+        has_turbo = isinstance(key_files, dict) and ("turbo.json" in key_files or "turbo.yaml" in key_files)
+        if not has_turbo and isinstance(key_files, dict):
+            root_pkg = key_files.get("package.json", "")
+            if isinstance(root_pkg, str) and "turbo" in root_pkg.lower():
+                has_turbo = True
+        
+        # Detect standalone Next.js output
+        has_standalone = False
+        svc_pkg_path = f"{build_ctx}/package.json" if build_ctx != "." else "package.json"
+        svc_pkg_content = key_files.get(svc_pkg_path, "") if isinstance(key_files, dict) else ""
+        if isinstance(svc_pkg_content, str) and '"standalone"' in svc_pkg_content.lower():
+            has_standalone = True
+        for cfg_name in [f"{build_ctx}/next.config.js", f"{build_ctx}/next.config.mjs", f"{build_ctx}/next.config.ts"]:
+            cfg_content = key_files.get(cfg_name, "") if isinstance(key_files, dict) else ""
+            if isinstance(cfg_content, str) and "standalone" in cfg_content:
+                has_standalone = True
+                break
+        
+        # Enrich stack tokens with inferred evidence so the template scorer can match
+        token_set = {t.lower() for t in stack_tokens}
+        if has_pnpm_lock and "pnpm" not in token_set:
+            stack_tokens.append("pnpm")
+        if has_turbo and "turbo" not in token_set:
+            stack_tokens.append("turbo")
+        if isinstance(svc_pkg_content, str) and "next" in svc_pkg_content.lower() and "next" not in token_set:
+            stack_tokens.append("next")
+        
+        template_signals = {
+            "is_monorepo": is_monorepo,
+            "has_turbo": has_turbo,
+            "has_standalone": has_standalone,
+        }
+        
+        print(f"[docker_gen] Matching template for {svc_name}: tokens={stack_tokens}, signals={template_signals}")
+        
+        matched = match_template(stack_tokens, template_signals)
+        if matched:
+            template_vars = dict(matched.get("variables", {}))
+            # Override with actual service values
+            template_vars["port"] = port
+            template_vars["service_path"] = build_ctx if build_ctx != "." else template_vars.get("service_path", ".")
+            
+            baseline_dockerfile = fill_template(matched["template_content"], template_vars)
+            template_used = True
+            print(f"[docker_gen] Template matched: {matched.get('name', 'unknown')} for {svc_name}")
+        elif isinstance(existing_dockerfile, str) and existing_dockerfile.strip():
+            baseline_dockerfile = existing_dockerfile
+        else:
+            baseline_dockerfile = _build_deterministic_dockerfile(
                 service,
-                state.get("stack_tokens", []),
+                stack_tokens,
                 available_scripts,
                 command_hints=command_hints,
             )
-        )
+        
         repair_key_files = dict(key_files) if isinstance(key_files, dict) else {}
         if isinstance(scan_dirs, list):
             repair_key_files["__has_packages_dir__"] = any(
@@ -477,18 +540,14 @@ def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             available_scripts=available_scripts,
         )
 
-        if existing_dockerfile:
-            examples = fetch_reference_examples(
-                artifact_type="dockerfile",
-                detected_stack=state.get("detected_stack", "unknown"),
-                stack_tokens=state.get("stack_tokens", []),
-                service=service,
-                limit=3,
-            )
-            references = format_examples_for_prompt(examples)
+        # ─── Use the baseline directly as the final Dockerfile ─────────────
+        # The LLM is only asked to verify, not to rewrite.
+        dockerfiles[dockerfile_key] = baseline_dockerfile
 
-            prompt = f"""
-You are a DevOps expert refining a deterministic baseline Dockerfile.
+        # ─── LLM Verification (advisory only, does not replace content) ───
+        verify_prompt = f"""
+You are a DevOps expert reviewing a Dockerfile for production deployment.
+Do NOT output a new Dockerfile. Only check for issues.
 
 Service: {svc_name}
 Build context: {build_ctx}
@@ -496,97 +555,43 @@ Port: {port}
 Stack: {state.get('detected_stack', 'unknown')}
 {scripts_hint}
 {commands_hint}
+{'Template used: ' + matched.get('name', 'unknown') if template_used and matched else 'Generated deterministically'}
 
-DETERMINISTIC BASELINE Dockerfile:
+Dockerfile to verify:
 {baseline_dockerfile}
 
-EXISTING Dockerfile (from repository):
-{existing_dockerfile}
+{('EXISTING Dockerfile (from repository) for reference:' + chr(10) + existing_dockerfile) if existing_dockerfile else ''}
 
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
+Respond with ONLY a JSON object:
+- "verdict": "pass" if the Dockerfile looks correct, "fail" if there are critical issues
+- "issues": a list of strings describing each issue (empty list if verdict is "pass")
 
-Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
-
-Rules:
-1. Use multi-stage builds if not already present.
-2. Use slim/alpine base images.
-3. Do NOT copy node_modules / venv directly, build inside builder stage.
-4. Run as non-root user.
-5. EXPOSE the correct port and DO NOT include HEALTHCHECK instructions.
-6. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
-7. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
-8. If the repo uses Turborepo (`turbo.json`), use `npx turbo run build --filter=./<service_path>...` for building.
-9. Only run a build script when a `build` script exists for this service or Turborepo indicates it.
-10. If no `build` script exists and not using Turbo, do not run build; use a runtime command that matches available scripts/artifacts.
-11. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
-12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-13. Do NOT include any preamble like 'IMPROVED Dockerfile:' or commentary. Return ONLY the raw Dockerfile.
-14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
+Example: {{"verdict": "pass", "issues": []}}
+Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build step"]}}
 """
-        else:
-            examples = fetch_reference_examples(
-                artifact_type="dockerfile",
-                detected_stack=state.get("detected_stack", "unknown"),
-                stack_tokens=state.get("stack_tokens", []),
-                service=service,
-                limit=3,
-            )
-            references = format_examples_for_prompt(examples)
 
-            prompt = f"""
-You are a DevOps expert refining a deterministic baseline Dockerfile.
-
-Service: {svc_name}
-Build context: {build_ctx}
-Port: {port}
-Stack: {state.get('detected_stack', 'unknown')}
-{scripts_hint}
-{commands_hint}
-Repo scan: {json.dumps(scan, indent=2)}
-
-DETERMINISTIC BASELINE Dockerfile:
-{baseline_dockerfile}
-
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
-
-Improve the baseline Dockerfile using these rules:
-1. Use multi-stage builds.
-2. Use slim/alpine base images.
-3. Do NOT copy node_modules / venv directly from host, build inside the builder stage.
-4. Run as non-root user.
-5. EXPOSE the port and DO NOT include HEALTHCHECK instructions.
-6. For pnpm monorepos (apps/* service with root lockfile), copy required root/workspace manifests before install.
-7. Prefer `pnpm i --frozen-lockfile --filter ./<service_path>...` for workspace installs.
-8. If the repo uses Turborepo (`turbo.json`), use `npx turbo run build --filter=./<service_path>...` for building.
-9. Only run a build script when a `build` script exists for this service or Turborepo indicates it.
-10. If no `build` script exists and not using Turbo, do not run build; use a runtime command that matches available scripts/artifacts.
-11. Prioritize command hints from commands_gen for install/build/run when they are consistent with repository evidence.
-12. Output ONLY Dockerfile content, no explanations. Do not wrap in markdown.
-13. Do NOT include any preamble or commentary. Return ONLY the raw Dockerfile.
-14. Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
-"""
-        
         try:
             response, _, _ = invoke_with_retry(
                 invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt),
-                prompt=prompt,
+                prompt=verify_prompt,
                 fallback_prompt=FALLBACK_PROMPTS["docker"],
                 config=RETRY_CONFIGS["docker"],
-                node_name=f"docker_gen:{svc_name}",
+                node_name=f"docker_verify:{svc_name}",
             )
-            dockerfile = strip_markdown_wrapper(response.content)
-            dockerfile = _repair_dockerfile_output(
-                dockerfile,
-                service=service,
-                key_files=repair_key_files,
-                available_scripts=available_scripts,
-            )
-            dockerfiles[dockerfile_key] = dockerfile
+            verify_text = strip_markdown_wrapper(response.content).strip()
+            try:
+                verdict = json.loads(verify_text)
+                if verdict.get("verdict") == "fail":
+                    issues = verdict.get("issues", [])
+                    for issue in issues:
+                        warnings.append(f"llm_verify:{svc_name}:{issue}")
+                    print(f"[docker_verify] {svc_name}: FAIL — {issues}")
+                else:
+                    print(f"[docker_verify] {svc_name}: PASS")
+            except (json.JSONDecodeError, TypeError):
+                print(f"[docker_verify] {svc_name}: Could not parse LLM verification response")
         except Exception as e:
-            warnings.append(f"llm_refine_failed:{svc_name}:{e}")
-            dockerfiles[dockerfile_key] = baseline_dockerfile
+            warnings.append(f"llm_verify_failed:{svc_name}:{e}")
         finally:
             service["build_context"] = original_ctx
     

@@ -12,6 +12,12 @@ from tools.example_bank import (
     seed_example_bank_from_repos,
     fetch_reference_examples,
 )
+from tools.template_store import (
+    seed_default_templates,
+    list_templates,
+    upsert_template,
+    delete_template,
+)
 
 app = FastAPI(title="SD-Artifacts Repo Analyzer")
 
@@ -93,6 +99,23 @@ class FeedbackRequest(BaseModel):
     commit_sha: str
     feedback: str
     github_token: Optional[str] = None
+
+
+class TemplateRequest(BaseModel):
+    name: str
+    description: str = ""
+    match_stack_tokens: List[str] = Field(default_factory=list)
+    match_signals: Dict = Field(default_factory=dict)
+    priority: int = 0
+    template_content: str = ""
+    variables: Dict = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class TemplateSeedResponse(BaseModel):
+    inserted: int = 0
+    updated: int = 0
+    skipped: int = 0
 
 
 def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str):
@@ -464,6 +487,39 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/templates")
+async def get_templates(active_only: bool = True):
+    templates = list_templates(active_only=active_only)
+    return {"templates": templates}
+
+
+@app.post("/templates")
+async def create_or_update_template(req: TemplateRequest):
+    try:
+        result = upsert_template(req.model_dump() if hasattr(req, 'model_dump') else req.dict())
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/templates/seed", response_model=TemplateSeedResponse)
+async def seed_templates():
+    result = seed_default_templates()
+    return TemplateSeedResponse(**result)
+
+
+@app.delete("/templates/{name}")
+async def remove_template(name: str):
+    try:
+        deleted = delete_template(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
+        return {"deleted": True, "name": name}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 if __name__ == "__main__":
