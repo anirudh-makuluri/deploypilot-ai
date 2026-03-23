@@ -132,7 +132,7 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     if supabase and commit_sha != "unknown":
         for attempt in range(3):
             try:
-                response = supabase.table("analysis_cache").select("result").eq("repo_url", state["repo_url"]).eq("commit_sha", commit_sha).execute()
+                response = supabase.table("analysis_cache").select("result").eq("repo_url", state["repo_url"]).eq("commit_sha", commit_sha).eq("package_path", requested_package_path).execute()
                 if response.data and len(response.data) > 0:
                     cached = _pick_best_cached_response(response.data, requested_package_path)
                     if cached:

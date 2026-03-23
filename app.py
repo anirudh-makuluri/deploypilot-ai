@@ -92,11 +92,13 @@ class DeleteCacheResponse(BaseModel):
     deleted: int
     repo_url: str
     commit_sha: Optional[str] = None
+    package_path: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
     repo_url: str
     commit_sha: str
+    package_path: str = "."
     feedback: str
     github_token: Optional[str] = None
 
@@ -118,7 +120,7 @@ class TemplateSeedResponse(BaseModel):
     skipped: int = 0
 
 
-def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str):
+def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: str = "."):
     from db import supabase
 
     if not supabase:
@@ -130,6 +132,7 @@ def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str):
             .select("result")
             .eq("repo_url", repo_url)
             .eq("commit_sha", commit_sha)
+            .eq("package_path", package_path)
             .single()
             .execute()
         )
@@ -194,6 +197,7 @@ async def analyze_repo(req: AnalyzeRequest):
                 supabase.table("analysis_cache").insert({
                     "repo_url": req.repo_url,
                     "commit_sha": commit_sha,
+                    "package_path": req.package_path,
                     "result": result_dict
                 }).execute()
                 print(f"Cached new analysis for {req.repo_url} at {commit_sha}")
@@ -255,6 +259,8 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
         query = supabase.table("analysis_cache").select("id").eq("repo_url", req.repo_url)
         if req.commit_sha:
             query = query.eq("commit_sha", req.commit_sha)
+        if req.package_path:
+            query = query.eq("package_path", req.package_path)
 
         existing = query.execute()
         rows = existing.data or []
@@ -264,6 +270,8 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
         delete_query = supabase.table("analysis_cache").delete().eq("repo_url", req.repo_url)
         if req.commit_sha:
             delete_query = delete_query.eq("commit_sha", req.commit_sha)
+        if req.package_path:
+            delete_query = delete_query.eq("package_path", req.package_path)
         delete_query.execute()
 
         return DeleteCacheResponse(
@@ -346,6 +354,7 @@ async def analyze_repo_stream(req: AnalyzeRequest):
                         supabase.table("analysis_cache").insert({
                             "repo_url": req.repo_url,
                             "commit_sha": commit_sha,
+                            "package_path": req.package_path,
                             "result": result_dict
                         }).execute()
                         print(f"Cached new analysis for {req.repo_url} at {commit_sha}")
@@ -370,7 +379,7 @@ async def improve_with_feedback(req: FeedbackRequest):
     from graph.feedback import run_feedback_improvement
 
     # 1. Fetch existing cached analysis
-    supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha)
+    supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
 
     # 2. Regenerate artifacts guided by the feedback
     tracker = TokenTracker()
@@ -405,9 +414,10 @@ async def improve_with_feedback(req: FeedbackRequest):
             {
                 "repo_url": req.repo_url,
                 "commit_sha": req.commit_sha,
+                "package_path": cached_result.get("_cache_package_path", "."),
                 "result": result_dict,
             },
-            on_conflict="repo_url,commit_sha",
+            on_conflict="repo_url,commit_sha,package_path",
         ).execute()
         print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
     except Exception as e:
@@ -424,7 +434,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
         tracker = TokenTracker()
 
         try:
-            supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha)
+            supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
         except HTTPException as e:
             yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
             return
@@ -472,9 +482,10 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                     {
                         "repo_url": req.repo_url,
                         "commit_sha": req.commit_sha,
+                        "package_path": cached_result.get("_cache_package_path", "."),
                         "result": result_dict,
                     },
-                    on_conflict="repo_url,commit_sha",
+                    on_conflict="repo_url,commit_sha,package_path",
                 ).execute()
                 print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
             except Exception as e:
