@@ -2,6 +2,7 @@ from typing import Dict, Any
 import json
 import re
 import yaml
+from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_compose, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
@@ -521,7 +522,7 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
     return yaml.safe_dump(parsed, sort_keys=False)
 
 
-def compose_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def compose_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     """Generate a docker-compose.yml for all services."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
@@ -621,7 +622,7 @@ Improve the baseline compose file using these rules:
 
     try:
         response, attempts_used, fallback_used = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt),
+            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt, config=config),
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["compose"],
             config=RETRY_CONFIGS["compose"],

@@ -3,6 +3,7 @@ import json
 
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
+from langchain_core.runnables.config import RunnableConfig
 
 from .llm_retry import invoke_with_retry
 from .nodes.llm_config import (
@@ -101,7 +102,7 @@ def _get_instruction(
     )
 
 
-def feedback_coordinator_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def feedback_coordinator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     services = state.get("services", [])
     detected_stack = state.get("detected_stack", "unknown")
     dockerfiles = state.get("dockerfiles", {})
@@ -166,7 +167,7 @@ Keep instructions concise, actionable, and file-specific.
     try:
         def _invoke(raw_prompt: str):
             structured = llm_coordinator.with_structured_output(CoordinatorOutput)
-            return structured.invoke(raw_prompt)
+            return structured.invoke(raw_prompt, config=config)
 
         result, _, _ = invoke_with_retry(
             invoke_fn=_invoke,
@@ -184,7 +185,7 @@ Keep instructions concise, actionable, and file-specific.
     return state
 
 
-def dockerfile_improver_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def dockerfile_improver_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     dockerfiles = state.get("dockerfiles", {})
     detected_stack = state.get("detected_stack", "unknown")
     feedback = state.get("feedback", "")
@@ -219,7 +220,7 @@ Rules:
 """
         try:
             response, _, _ = invoke_with_retry(
-                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt),
+                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt, config=config),
                 prompt=prompt,
                 fallback_prompt=FALLBACK_PROMPTS["docker"],
                 config=RETRY_CONFIGS["docker"],
@@ -233,7 +234,7 @@ Rules:
     return state
 
 
-def compose_improver_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def compose_improver_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     current_compose = state.get("docker_compose") or ""
     detected_stack = state.get("detected_stack", "unknown")
     services = state.get("services", [])
@@ -266,7 +267,7 @@ Rules:
 """
     try:
         response, _, _ = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt),
+            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt, config=config),
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["compose"],
             config=RETRY_CONFIGS["compose"],
@@ -279,7 +280,7 @@ Rules:
     return state
 
 
-def nginx_improver_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def nginx_improver_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     current_nginx = state.get("nginx_conf") or ""
     services = state.get("services", [])
     feedback = state.get("feedback", "")
@@ -310,7 +311,7 @@ Rules:
 """
     try:
         response, _, _ = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt),
+            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt, config=config),
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["nginx"],
             config=RETRY_CONFIGS["nginx"],
@@ -324,7 +325,7 @@ Rules:
     return state
 
 
-def feedback_verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def feedback_verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     dockerfiles = state.get("dockerfiles", {})
     docker_compose = state.get("docker_compose", "")
     nginx_conf = state.get("nginx_conf", "")
@@ -363,7 +364,7 @@ Return confidence (0.0-1.0) and risks list. Each risk must be one separate item.
     try:
         def _invoke_verifier(raw_prompt: str):
             structured_llm = llm_verifier.with_structured_output(VerifierOutput)
-            return structured_llm.invoke(raw_prompt)
+            return structured_llm.invoke(raw_prompt, config=config)
 
         result, _, _ = invoke_with_retry(
             invoke_fn=_invoke_verifier,

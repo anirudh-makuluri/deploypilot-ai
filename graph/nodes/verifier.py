@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, model_validator
 import json
 import re
 import subprocess
+from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_verifier, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 
@@ -244,7 +245,7 @@ def _compute_deterministic_confidence(
     bounded = max(0.1, min(0.99, score))
     return round(bounded, 2)
 
-def verifier_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     """Review all generated artifacts and assign confidence + risks."""
     scan = state.get("repo_scan", {})
     services = state.get("services", [])
@@ -296,7 +297,7 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
     try:
         def _invoke(raw_prompt: str):
             structured_llm = llm_verifier.with_structured_output(VerifierOutput)
-            return structured_llm.invoke(raw_prompt)
+            return structured_llm.invoke(raw_prompt, config=config)
 
         result, attempts_used, fallback_used = invoke_with_retry(
             invoke_fn=_invoke,

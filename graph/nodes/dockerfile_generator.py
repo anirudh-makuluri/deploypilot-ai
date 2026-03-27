@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import json
 import re
+from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_docker, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
@@ -411,7 +412,7 @@ def _repair_dockerfile_output(
     return fixed if changed else content
 
 
-def dockerfile_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     """Generate production Dockerfiles for each service."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
@@ -572,7 +573,7 @@ Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build st
 
         try:
             response, _, _ = invoke_with_retry(
-                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt),
+                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt, config=config),
                 prompt=verify_prompt,
                 fallback_prompt=FALLBACK_PROMPTS["docker"],
                 config=RETRY_CONFIGS["docker"],

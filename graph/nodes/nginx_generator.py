@@ -1,5 +1,6 @@
 from typing import Dict, Any
 import re
+from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_nginx, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 
@@ -273,7 +274,7 @@ def _infer_route_guidance(scan: Dict[str, Any], services: list[dict[str, Any]]) 
     )
 
 
-def nginx_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     """Generate an nginx.conf for production deployment with multi-service routing."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
@@ -355,7 +356,7 @@ Improve the baseline config using these rules:
 
     try:
         response, attempts_used, fallback_used = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt),
+            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt, config=config),
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["nginx"],
             config=RETRY_CONFIGS["nginx"],

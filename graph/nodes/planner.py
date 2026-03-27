@@ -2,6 +2,7 @@ from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 import json
 import os
+from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_planner, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 from tools.port_and_stack_extractor import extract_port_and_stack
@@ -445,7 +446,7 @@ def _apply_deterministic_fallback(
     return True
 
 
-def planner_node(state: Dict[str, Any]) -> Dict[str, Any]:
+def planner_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
     """Infer stack, services, and deployability from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
     repo_url = state.get("repo_url", "")
@@ -552,7 +553,7 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 """
 
     def _invoke(raw_prompt: str):
-        return llm_planner.invoke(raw_prompt)
+        return llm_planner.invoke(raw_prompt, config=config)
 
     def _validate(response):
         content = response.content.strip()
