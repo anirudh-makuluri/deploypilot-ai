@@ -56,6 +56,11 @@ class FakeTableQuery:
         self.filters[key] = value
         return self
 
+    def is_(self, key, value):
+        # Supabase uses IS for NULL checks. For the fake, treat it as equality to None.
+        self.filters[key] = value
+        return self
+
     def execute(self):
         if self.supabase.fail_on_execute:
             raise RuntimeError("forced execute failure")
@@ -72,6 +77,8 @@ class FakeTableQuery:
                         "id": f"id-{len(self.supabase.cache_rows) + 1}",
                         "repo_url": self.insert_payload.get("repo_url"),
                         "commit_sha": self.insert_payload.get("commit_sha"),
+                        "package_path": self.insert_payload.get("package_path"),
+                        "service_name": self.insert_payload.get("service_name"),
                         "result": self.insert_payload.get("result"),
                     }
                 )
@@ -85,6 +92,8 @@ class FakeTableQuery:
                     if (
                         row.get("repo_url") == self.upsert_payload.get("repo_url")
                         and row.get("commit_sha") == self.upsert_payload.get("commit_sha")
+                        and row.get("package_path") == self.upsert_payload.get("package_path")
+                        and row.get("service_name") == self.upsert_payload.get("service_name")
                     ):
                         row["result"] = self.upsert_payload.get("result")
                         matched = True
@@ -95,6 +104,8 @@ class FakeTableQuery:
                             "id": f"id-{len(self.supabase.cache_rows) + 1}",
                             "repo_url": self.upsert_payload.get("repo_url"),
                             "commit_sha": self.upsert_payload.get("commit_sha"),
+                            "package_path": self.upsert_payload.get("package_path"),
+                            "service_name": self.upsert_payload.get("service_name"),
                             "result": self.upsert_payload.get("result"),
                         }
                     )
@@ -138,6 +149,12 @@ class FakeSupabase:
 def _set_common_mocks(monkeypatch):
     monkeypatch.setattr(app_module, "TokenTracker", FakeTracker)
 
+def _set_auth(monkeypatch):
+    monkeypatch.setenv("SD_API_BEARER_TOKEN", "test-token")
+
+def _auth_headers():
+    return {"Authorization": "Bearer test-token"}
+
 
 def _client():
     return TestClient(app_module.app)
@@ -162,16 +179,18 @@ def _parse_sse(response_text):
 
 
 def test_analyze_returns_400_on_graph_error(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(app_module.graph, "invoke", lambda *_args, **_kwargs: {"error": "scan failed"})
 
-    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 400
     assert response.json()["detail"] == "scan failed"
 
 
 def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(
         app_module.graph,
@@ -188,7 +207,7 @@ def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
         },
     )
 
-    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 200
     payload = response.json()
@@ -197,6 +216,7 @@ def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
 
 
 def test_analyze_success_without_supabase(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(
         app_module.graph,
@@ -215,6 +235,7 @@ def test_analyze_success_without_supabase(monkeypatch):
     response = _client().post(
         "/analyze",
         json={"repo_url": "https://github.com/acme/repo", "package_path": "services/api"},
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -224,6 +245,7 @@ def test_analyze_success_without_supabase(monkeypatch):
 
 
 def test_analyze_success_caches_result(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     fake_supabase = FakeSupabase()
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
@@ -243,6 +265,7 @@ def test_analyze_success_caches_result(monkeypatch):
     response = _client().post(
         "/analyze",
         json={"repo_url": "https://github.com/acme/repo", "package_path": "apps/web"},
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -254,13 +277,14 @@ def test_analyze_success_caches_result(monkeypatch):
 
 
 def test_analyze_cache_insert_retries_until_success(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     fake_supabase = FakeSupabase(fail_insert_attempts=2)
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
     monkeypatch.setattr(app_module.graph, "invoke", lambda *_args, **_kwargs: {"commit_sha": "sha", "risks": [], "confidence": 0.5})
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
-    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 200
     assert fake_supabase.insert_attempts == 3
@@ -268,6 +292,7 @@ def test_analyze_cache_insert_retries_until_success(monkeypatch):
 
 
 def test_examples_seed_success(monkeypatch):
+    _set_auth(monkeypatch)
     called = {}
 
     def fake_seed(**kwargs):
@@ -284,6 +309,7 @@ def test_examples_seed_success(monkeypatch):
             "max_files_per_repo": 9,
             "permissive_only": False,
         },
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -295,6 +321,7 @@ def test_examples_seed_success(monkeypatch):
 
 
 def test_examples_seed_popular_uses_builtin_list(monkeypatch):
+    _set_auth(monkeypatch)
     called = {}
 
     def fake_seed(**kwargs):
@@ -304,7 +331,7 @@ def test_examples_seed_popular_uses_builtin_list(monkeypatch):
     monkeypatch.setattr(app_module, "seed_example_bank_from_repos", fake_seed)
     monkeypatch.setattr(app_module, "POPULAR_EXAMPLE_REPOS", ["https://github.com/acme/one"])
 
-    response = _client().post("/examples/seed/popular?github_token=mytoken")
+    response = _client().post("/examples/seed/popular?github_token=mytoken", headers=_auth_headers())
 
     assert response.status_code == 200
     assert called["repo_urls"] == ["https://github.com/acme/one"]
@@ -352,34 +379,38 @@ def test_examples_preview_success(monkeypatch):
 
 
 def test_delete_cache_returns_503_when_supabase_missing(monkeypatch):
+    _set_auth(monkeypatch)
     monkeypatch.setattr(db_module, "supabase", None)
 
-    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 503
     assert "Supabase is not configured" in response.json()["detail"]
 
 
 def test_delete_cache_returns_404_when_not_found(monkeypatch):
+    _set_auth(monkeypatch)
     monkeypatch.setattr(db_module, "supabase", FakeSupabase(cache_rows=[]))
 
     response = _client().request(
         "DELETE",
         "/cache",
         json={"repo_url": "https://github.com/acme/repo", "commit_sha": "x"},
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 404
 
 
 def test_delete_cache_with_commit_sha_success(monkeypatch):
+    _set_auth(monkeypatch)
     monkeypatch.setattr(
         db_module,
         "supabase",
         FakeSupabase(
             cache_rows=[
-                {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "result": {}},
-                {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "result": {}},
+                {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "service_name": None, "result": {}},
+                {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "service_name": None, "result": {}},
             ]
         ),
     )
@@ -388,6 +419,7 @@ def test_delete_cache_with_commit_sha_success(monkeypatch):
         "DELETE",
         "/cache",
         json={"repo_url": "https://github.com/acme/repo", "commit_sha": "b"},
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -395,20 +427,23 @@ def test_delete_cache_with_commit_sha_success(monkeypatch):
         "deleted": 1,
         "repo_url": "https://github.com/acme/repo",
         "commit_sha": "b",
+        "package_path": ".",
+        "service_name": None,
     }
 
 
 def test_delete_cache_by_repo_success(monkeypatch):
+    _set_auth(monkeypatch)
     fake_supabase = FakeSupabase(
         cache_rows=[
-            {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "result": {}},
-            {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "result": {}},
-            {"id": "3", "repo_url": "https://github.com/acme/other", "commit_sha": "z", "result": {}},
+            {"id": "1", "repo_url": "https://github.com/acme/repo", "commit_sha": "a", "package_path": ".", "service_name": None, "result": {}},
+            {"id": "2", "repo_url": "https://github.com/acme/repo", "commit_sha": "b", "package_path": ".", "service_name": None, "result": {}},
+            {"id": "3", "repo_url": "https://github.com/acme/other", "commit_sha": "z", "package_path": ".", "service_name": None, "result": {}},
         ]
     )
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
 
-    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 200
     assert response.json()["deleted"] == 2
@@ -416,15 +451,17 @@ def test_delete_cache_by_repo_success(monkeypatch):
 
 
 def test_delete_cache_returns_500_for_unexpected_failure(monkeypatch):
+    _set_auth(monkeypatch)
     monkeypatch.setattr(db_module, "supabase", FakeSupabase(fail_on_execute=True))
 
-    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().request("DELETE", "/cache", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 500
     assert "Failed to delete cache" in response.json()["detail"]
 
 
 def test_analyze_stream_emits_error_event_from_node(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
 
     async def fake_astream(_initial_state, config=None):
@@ -434,7 +471,7 @@ def test_analyze_stream_emits_error_event_from_node(monkeypatch):
 
     monkeypatch.setattr(app_module.graph, "astream", fake_astream)
 
-    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     assert response.status_code == 200
     events = _parse_sse(response.text)
@@ -444,6 +481,7 @@ def test_analyze_stream_emits_error_event_from_node(monkeypatch):
 
 
 def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
 
     async def fake_astream(_initial_state, config=None):
@@ -464,15 +502,21 @@ def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):
 
     monkeypatch.setattr(app_module.graph, "astream", fake_astream)
 
-    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     events = _parse_sse(response.text)
+    # Cache hits should still look like a full run to clients.
+    progress_nodes = [data["node"] for (name, data) in events if name == "progress"]
+    assert progress_nodes[:1] == ["scanner"]
+    assert "planner" in progress_nodes
+    assert "docker_gen" in progress_nodes
     assert events[-1][0] == "complete"
     assert events[-1][1]["commit_sha"] == "stream-sha"
     assert events[-1][1]["token_usage"]["total_tokens"] == 18
 
 
 def test_analyze_stream_success_caches_and_completes(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     fake_supabase = FakeSupabase()
     monkeypatch.setattr(db_module, "supabase", fake_supabase)
@@ -496,6 +540,7 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
     response = _client().post(
         "/analyze/stream",
         json={"repo_url": "https://github.com/acme/repo", "package_path": "services/api"},
+        headers=_auth_headers(),
     )
 
     events = _parse_sse(response.text)
@@ -507,6 +552,7 @@ def test_analyze_stream_success_caches_and_completes(monkeypatch):
 
 
 def test_analyze_stream_emits_error_for_top_level_exception(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
 
     async def fake_astream(_initial_state, config=None):
@@ -517,15 +563,70 @@ def test_analyze_stream_emits_error_for_top_level_exception(monkeypatch):
 
     monkeypatch.setattr(app_module.graph, "astream", fake_astream)
 
-    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"})
+    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
 
     events = _parse_sse(response.text)
     assert len(events) == 1
     assert events[0][0] == "error"
     assert "boom" in events[0][1]["detail"]
 
+def test_analyze_allows_unauthenticated_cache_only_when_commit_sha_provided(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(
+        db_module,
+        "supabase",
+        FakeSupabase(
+            cache_rows=[
+                {
+                    "id": "1",
+                    "repo_url": "https://github.com/acme/repo",
+                    "commit_sha": "sha-cached",
+                    "package_path": ".",
+                    "service_name": None,
+                    "result": {
+                        "commit_sha": "sha-cached",
+                        "stack_summary": "FastAPI",
+                        "services": [],
+                        "dockerfiles": {},
+                        "risks": [],
+                        "confidence": 0.9,
+                        "_cache_package_path": ".",
+                    },
+                }
+            ]
+        ),
+    )
+
+    response = _client().post(
+        "/analyze",
+        json={"repo_url": "https://github.com/acme/repo", "commit_sha": "sha-cached"},
+        # no auth header on purpose
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["commit_sha"] == "sha-cached"
+    assert payload["stack_summary"] == "FastAPI"
+
+
+def test_analyze_rejects_unauthenticated_when_cache_missing(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", FakeSupabase(cache_rows=[]))
+    monkeypatch.setattr(app_module.graph, "invoke", lambda *_args, **_kwargs: {"commit_sha": "x"})
+
+    response = _client().post(
+        "/analyze",
+        json={"repo_url": "https://github.com/acme/repo", "commit_sha": "missing"},
+        # no auth header on purpose
+    )
+
+    assert response.status_code == 401
+
 
 def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     fake_supabase = FakeSupabase(
         cache_rows=[
@@ -533,6 +634,8 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
                 "id": "1",
                 "repo_url": "https://github.com/acme/repo",
                 "commit_sha": "sha-1",
+                "package_path": ".",
+                "service_name": None,
                 "result": {
                     "commit_sha": "sha-1",
                     "stack_summary": "FastAPI",
@@ -581,6 +684,7 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
             "commit_sha": "sha-1",
             "feedback": "fix api healthcheck",
         },
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -594,6 +698,7 @@ def test_feedback_stream_success_emits_progress_and_complete(monkeypatch):
 
 
 def test_feedback_stream_emits_error_when_cache_missing(monkeypatch):
+    _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(db_module, "supabase", FakeSupabase(cache_rows=[]))
 
@@ -604,6 +709,7 @@ def test_feedback_stream_emits_error_when_cache_missing(monkeypatch):
             "commit_sha": "missing",
             "feedback": "fix api",
         },
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200

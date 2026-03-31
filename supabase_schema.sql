@@ -3,9 +3,11 @@ create table public.analysis_cache (
   id uuid default gen_random_uuid() primary key,
   repo_url text not null,
   commit_sha text not null,
+  package_path text not null default '.',
+  service_name text,
   result jsonb not null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  unique(repo_url, commit_sha)
+  unique(repo_url, commit_sha, package_path, service_name)
 );
 
 -- Setup Row Level Security (RLS) if needed
