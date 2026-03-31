@@ -128,6 +128,9 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     commit_sha = scan.get("commit_sha", "unknown")
     state["commit_sha"] = commit_sha
     requested_package_path = _normalize_package_path(state.get("package_path", "."))
+    if state.get("service_name"):
+        state["repo_scan"] = scan
+        return state
     
     if supabase and commit_sha != "unknown":
         for attempt in range(3):

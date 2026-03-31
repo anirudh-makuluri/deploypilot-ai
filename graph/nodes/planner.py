@@ -81,6 +81,45 @@ def _filter_services_to_package_scope(services: List[ServiceInfo], package_path:
     return filtered
 
 
+def _filter_services_by_selector(
+    services: List[ServiceInfo],
+    selector: str,
+) -> tuple[List[ServiceInfo], str | None]:
+    """Select services by name/build_context/dockerfile_path (case-insensitive)."""
+    normalized = (selector or "").strip().lower()
+    if not normalized:
+        return services, None
+
+    def _norm_path(value: str) -> str:
+        return _normalize_ctx(value).lower()
+
+    def _norm_file(value: str) -> str:
+        return (value or "").replace("\\", "/").strip().lower()
+
+    name_matches = [svc for svc in services if (svc.name or "").strip().lower() == normalized]
+    if name_matches:
+        return name_matches, "name"
+
+    selector_ctx = _norm_path(selector)
+    ctx_matches = [svc for svc in services if _norm_path(svc.build_context) == selector_ctx]
+    if ctx_matches:
+        return ctx_matches, "build_context"
+
+    selector_file = _norm_file(selector)
+    df_matches = [svc for svc in services if _norm_file(svc.dockerfile_path) == selector_file]
+    if df_matches:
+        return df_matches, "dockerfile_path"
+
+    fuzzy_matches = [
+        svc
+        for svc in services
+        if normalized in (svc.name or "").lower()
+        or normalized in _norm_path(svc.build_context)
+        or normalized in _norm_file(svc.dockerfile_path)
+    ]
+    return fuzzy_matches, "fuzzy"
+
+
 def _apply_per_service_port_refinement(
     services: List[ServiceInfo],
     repo_url: str,
@@ -594,6 +633,25 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         ]
         filtered_services = _filter_services_to_package_scope(filtered_services, package_path)
         filtered_services = _dedupe_services_by_context(filtered_services)
+        service_selector = (state.get("service_name") or "").strip()
+        if service_selector:
+            selected, match_kind = _filter_services_by_selector(filtered_services, service_selector)
+            if not selected:
+                available = ", ".join(sorted({s.name for s in filtered_services if s.name})) or "none"
+                state["error"] = (
+                    f"Requested service '{service_selector}' was not found. "
+                    f"Available services: {available}"
+                )
+                return state
+            if len(selected) > 1:
+                matched = ", ".join(sorted({s.name for s in selected if s.name})) or "multiple"
+                state["error"] = (
+                    f"Requested service '{service_selector}' is ambiguous (matched by {match_kind}). "
+                    f"Matches: {matched}"
+                )
+                return state
+            filtered_services = selected
+
         if not filtered_services:
             if _apply_deterministic_fallback(
                 state=state,

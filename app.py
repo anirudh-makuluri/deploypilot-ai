@@ -34,6 +34,7 @@ class AnalyzeRequest(BaseModel):
     github_token: Optional[str] = None
     max_files: Optional[int] = 50
     package_path: str = "."
+    service_name: Optional[str] = None
 
 class TokenUsage(BaseModel):
     input_tokens: int = 0
@@ -154,6 +155,7 @@ async def analyze_repo(req: AnalyzeRequest):
         "github_token": req.github_token,
         "max_files": req.max_files,
         "package_path": req.package_path,
+        "service_name": req.service_name,
     }
     result = graph.invoke(initial_state, config={"callbacks": [tracker]})
     
@@ -188,7 +190,7 @@ async def analyze_repo(req: AnalyzeRequest):
     
     # Save to Supabase cache
     from db import supabase
-    if supabase and commit_sha != "unknown":
+    if supabase and commit_sha != "unknown" and not req.service_name:
         for attempt in range(3):
             try:
                 result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
@@ -293,8 +295,9 @@ async def analyze_repo_stream(req: AnalyzeRequest):
             "repo_url": req.repo_url,
             "github_token": req.github_token,
             "max_files": req.max_files,
-            "package_path": req.package_path,
-        }
+        "package_path": req.package_path,
+        "service_name": req.service_name,
+    }
         
         try:
             full_state = {}
@@ -345,7 +348,7 @@ async def analyze_repo_stream(req: AnalyzeRequest):
             # Save to Supabase cache
             from db import supabase
             commit_sha = full_state.get("commit_sha", "unknown")
-            if supabase and commit_sha != "unknown":
+            if supabase and commit_sha != "unknown" and not req.service_name:
                 for attempt in range(3):
                     try:
                         result_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
