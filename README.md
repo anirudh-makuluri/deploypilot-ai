@@ -238,6 +238,23 @@ python tools/evaluate_scan_quality.py \
   --include-generated
 ```
 
+Latest snapshot from [`benchmarks/latest-scan-quality.json`](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/benchmarks/latest-scan-quality.json):
+
+- Run ID: `20260407-020210`
+- Generated at: `2026-04-07T02:02:10.661596+00:00`
+- Targets evaluated: `18`
+- Service precision/recall/F1: `0.9545 / 0.8750 / 0.9130`
+- Mobile leakage rate: `0.0`
+- Stack accuracy: `1.0`
+- Known-port accuracy: `0.8333` (`20/24`)
+- Port unknown rate: `0.0417`
+- Failure buckets: `ok = 16`, `port_mismatch = 1`, `service_recall_miss = 1`
+- Checked-in artifact summary:
+- Dockerfile avg/pass-rate: `0.6179 / 0.2857`
+- Compose avg/pass-rate: `0.8167 / 0.6667`
+- Nginx avg/pass-rate: `0.1611 / 0.0`
+- Combined avg/all-present-pass-rate: `0.5953 / 0.2`
+
 See [docs/quality-and-testing.md](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/docs/quality-and-testing.md) for metrics, thresholds, and output details.
 
 ## Testing

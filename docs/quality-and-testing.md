@@ -151,28 +151,28 @@ Generated-mode compose audit logic:
 - Generated Nginx `avg_total_score >= 0.85`
 - `wrong_compose_gen_rate == 0.0`
 
-### 5) Latest benchmark snapshot (V2)
+### 5) Latest benchmark snapshot
 
-From `benchmarks/latest-scan-quality.json` (run `20260313-023948`, 18 labeled targets):
+From `benchmarks/latest-scan-quality.json` (run `20260407-020210`, generated `2026-04-07T02:02:10.661596+00:00`, 18 labeled targets):
 
 **Planner metrics:**
-- `service_precision`: 1.0
-- `service_recall`: 0.9583
-- `service_f1`: 0.9787
+- `service_precision`: 0.9545
+- `service_recall`: 0.8750
+- `service_f1`: 0.9130
 - `mobile_leakage_rate`: 0.0
 - `stack_accuracy`: 1.0
-- `port_accuracy_known`: 0.875 (21/24)
+- `port_accuracy_known`: 0.8333 (20/24)
 - `port_unknown_rate`: 0.0417
 - `wrong_compose_gen_rate`: 0.0
-- Failure buckets: ok = 18
+- Failure buckets: `ok = 16`, `port_mismatch = 1`, `service_recall_miss = 1`
 
-**Generated artifact metrics (`--include-generated`):**
-- Dockerfile: avg = 1.0, pass_rate = 1.0 (threshold 0.90)
-- Compose: avg = 0.9208, pass_rate = 0.6667 (threshold 0.90)
-- Nginx: avg = 0.9685, pass_rate = 0.8889 (threshold 0.85)
-- Combined: avg = 0.9770, all_present_pass_rate = 0.7778
+**Checked-in artifact metrics:**
+- Dockerfile: avg = 0.6179, pass_rate = 0.2857 (threshold 0.90)
+- Compose: avg = 0.8167, pass_rate = 0.6667 (threshold 0.90)
+- Nginx: avg = 0.1611, pass_rate = 0.0 (threshold 0.85)
+- Combined: avg = 0.5953, all_present_pass_rate = 0.2
 
-**V2 scope note:** V2 covers artifact benchmarking and generation-quality improvement for Dockerfile, docker-compose, and nginx. Infrastructure service classification and infra-specific generation are deferred to V3.
+**Scope note:** This snapshot reflects the repo-artifact evaluation present in `benchmarks/latest-scan-quality.json`. Generated-artifact summary fields are only populated when the benchmark is run with `--include-generated`.
 
 ## Operational Notes
 
