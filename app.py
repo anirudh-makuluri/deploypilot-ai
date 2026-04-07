@@ -381,6 +381,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
         # Cache hits should still look like a full run to clients.
         yield f"event: progress\ndata: {json.dumps({'node': 'scanner', 'status': 'completed'})}\n\n"
         remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "verifier"]
+        if not cached_payload.get("docker_compose"):
+            remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
         total_delay_s = random.uniform(4.0, 10.0)
         step_delay_s = total_delay_s / max(1, len(remaining_nodes))
         for node in remaining_nodes:
@@ -390,6 +392,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
         yield f"event: complete\ndata: {json.dumps(cached_payload)}\n\n"
 
     async def live_event_generator():
+        import asyncio
+        import random
         tracker = TokenTracker()
         
         initial_state = {
@@ -428,6 +432,8 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         # Simulate the usual node progression so clients can't infer cache hits.
                         # Total delay is randomized to look like a real run.
                         remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "verifier"]
+                        if not cached.get("docker_compose"):
+                            remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
                         total_delay_s = random.uniform(4.0, 10.0)
                         step_delay_s = total_delay_s / max(1, len(remaining_nodes))
                         for node in remaining_nodes:

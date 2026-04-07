@@ -582,6 +582,21 @@ Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build st
             verify_text = strip_markdown_wrapper(response.content).strip()
             try:
                 verdict = json.loads(verify_text)
+            except (json.JSONDecodeError, TypeError):
+                # Try to recover if the model wrapped JSON in extra text or formatting.
+                try:
+                    import re
+                    match = re.search(r"\{.*\}", verify_text, re.DOTALL)
+                    if match:
+                        verdict = json.loads(match.group(0))
+                    else:
+                        raise json.JSONDecodeError("no JSON object could be decoded", verify_text, 0)
+                except Exception:
+                    warnings.append(f"llm_verify_unparsed:{svc_name}")
+                    print(f"[docker_verify] {svc_name}: Could not parse LLM verification response")
+                    verdict = None
+
+            if isinstance(verdict, dict):
                 if verdict.get("verdict") == "fail":
                     issues = verdict.get("issues", [])
                     for issue in issues:
@@ -589,8 +604,6 @@ Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build st
                     print(f"[docker_verify] {svc_name}: FAIL — {issues}")
                 else:
                     print(f"[docker_verify] {svc_name}: PASS")
-            except (json.JSONDecodeError, TypeError):
-                print(f"[docker_verify] {svc_name}: Could not parse LLM verification response")
         except Exception as e:
             warnings.append(f"llm_verify_failed:{svc_name}:{e}")
         finally:

@@ -7,17 +7,18 @@ This document covers test execution and objective scan-quality benchmarking.
 Current tests include:
 - `tests/test_app_endpoints.py`: API endpoint behavior and response contracts.
 - `tests/test_artifact_evaluators.py`: shared artifact evaluator regression fixtures.
+- `tests/test_commands_node.py`: generated install/build/run command selection.
 - `tests/test_feedback_workflow.py`: feedback coordinator and remediation behavior.
 - `tests/test_llm_retry.py`: retry wrapper behavior and exhaustion paths.
 - `tests/test_node_retry_integration.py`: planner and retry integration, including service dedupe and per-service port refinement.
 - `tests/test_port_and_stack_extractor.py`: stack token and port extraction logic.
-- `tests/test_eval_metrics.py`: aggregate scan quality metric calculations.
-- `tests/test_eval_metrics_dockerfile.py`: Dockerfile artifact scoring criteria.
-- `tests/test_eval_metrics_compose.py`: Compose artifact scoring criteria.
 - `tests/test_eval_metrics_nginx.py`: Nginx artifact scoring criteria.
 - `tests/test_evaluate_scan_quality.py`: end-to-end benchmark script behavior.
 - `tests/test_graph_flow.py`: graph routing behavior, including conditional compose generation.
 - `tests/test_github_tools.py`: GitHub utility behavior during scanning.
+- `tests/test_planner_service_selection.py`: service selection using `service_name` and scoped paths.
+- `tests/test_scanner_cache_scope.py`: package-scoped cache reuse rules.
+- `tests/test_verifier_risk_filtering.py`: deterministic verifier risk filtering behavior.
 
 Run tests:
 ```bash
@@ -35,11 +36,25 @@ Run the benchmark/planner regression subset:
 python -m pytest tests/test_node_retry_integration.py tests/test_evaluate_scan_quality.py -q
 ```
 
+Run API and cache-scope coverage:
+
+```bash
+python -m pytest tests/test_app_endpoints.py tests/test_scanner_cache_scope.py -q
+```
+
 ## Scan Quality Benchmarking
 
 The benchmark runner evaluates two layers of quality against a labels file:
 - Scanner and planner quality: service detection, mobile leakage, stack labeling, and known-port accuracy.
 - Artifact quality: Dockerfile, compose, and nginx scoring for repo files already checked into the target repository.
+
+The benchmark tooling is especially useful after changing:
+
+- stack token extraction
+- planner service-selection rules
+- port inference
+- Dockerfile, compose, or nginx generation behavior
+- verifier thresholds or artifact scorers
 
 When `--include-generated` is enabled, the runner also executes the generator nodes and scores the generated artifacts separately.
 
@@ -158,6 +173,13 @@ From `benchmarks/latest-scan-quality.json` (run `20260313-023948`, 18 labeled ta
 - Combined: avg = 0.9770, all_present_pass_rate = 0.7778
 
 **V2 scope note:** V2 covers artifact benchmarking and generation-quality improvement for Dockerfile, docker-compose, and nginx. Infrastructure service classification and infra-specific generation are deferred to V3.
+
+## Operational Notes
+
+- Many tests are pure unit tests and do not require network access.
+- Endpoint tests use fakes and monkeypatching rather than real Supabase or Bedrock calls.
+- Full analysis and benchmark runs may require valid credentials, GitHub access, and `hadolint` if you want lint-backed verification details.
+- Cached analysis behavior is part of the public contract, so cache-key changes should be treated as API-affecting changes.
 
 ## Stack Tokens
 

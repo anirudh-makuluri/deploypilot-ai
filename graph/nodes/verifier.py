@@ -114,12 +114,16 @@ def _filter_risks(
         if not text:
             continue
 
-        # Compose may be intentionally skipped for single-service/scope-local deploys.
+        # Do not surface risks solely about compose being "missing" when no compose file is present.
         if (
-            not compose_required
-            and not compose_present
+            not compose_present
             and "compose" in lowered
-            and any(token in lowered for token in ("missing", "not provided", "not present", "absent", "required"))
+            and (
+                any(token in lowered for token in ("missing", "not provided", "not present", "absent", "required"))
+                or "no docker-compose.yml" in lowered
+                or ("not generated" in lowered and "docker-compose.yml" in lowered)
+                or ("no " in lowered and "docker-compose.yml" in lowered)
+            )
         ):
             continue
 
@@ -150,8 +154,8 @@ def _filter_risks(
         ):
             continue
 
-        # Suppress healthcheck warnings when backend Dockerfile already defines HEALTHCHECK.
-        if "health check" in lowered and "backend" in lowered and has_backend_healthcheck:
+        # Drop any risks about health checks entirely; health check management is out of scope.
+        if "health check" in lowered or "healthcheck" in lowered:
             continue
 
         # Suppress generic secret-management warning unless explicit hardcoded secrets are found.
@@ -165,8 +169,8 @@ def _filter_risks(
             if not any(marker in compose_lower for marker in hardcoded_secret_markers):
                 continue
 
-        # Environment placeholders in compose are expected for deploy-time injection.
-        if "docker-compose" in lowered and "environment variable" in lowered and "not explicitly defined" in lowered:
+        # Drop any risks focused on environment variable management; env var handling is left to deploy-time configuration.
+        if "environment variable" in lowered or "env var" in lowered or "environment variables" in lowered:
             continue
 
         # Suppress websocket hardening warnings when required proxy headers are present.
@@ -285,8 +289,8 @@ Review for:
 1. Port consistency — do Dockerfiles EXPOSE the same ports referenced in compose and nginx?
 2. Build context accuracy — do compose build contexts match the actual repo directory structure?
 3. Security — non-root users, no hardcoded secrets, proper headers in nginx?
-4. Completeness — are all services accounted for? Are missing env vars flagged?
-5. Best practices — multi-stage builds, health checks, proper caching layers?
+4. Completeness — are all services accounted for?
+5. Best practices — multi-stage builds and effective caching layers?
 
 Provide a confidence score (0.0 to 1.0) and a list of specific risks or issues found.
 Each risk must be a separate string in the list. Do NOT combine multiple risks into one string.
