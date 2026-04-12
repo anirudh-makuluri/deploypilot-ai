@@ -127,6 +127,12 @@ class TemplateSeedResponse(BaseModel):
     skipped: int = 0
 
 
+class HealthResponse(BaseModel):
+    status: str
+    scope: str
+    supabase_configured: bool
+
+
 def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: str = "."):
     from db import supabase
 
@@ -190,7 +196,7 @@ def _fetch_cached_analysis_or_404_service_aware(
 
 
 def _require_auth(authorization: Optional[str]) -> None:
-    expected = os.getenv("SD_API_BEARER_TOKEN") or os.getenv("API_BEARER_TOKEN") or os.getenv("API_AUTH_TOKEN")
+    expected = os.getenv("SD_API_BEARER_TOKEN")
     if not expected:
         raise HTTPException(status_code=503, detail="API authentication is not configured on the server")
     if not authorization or not authorization.startswith("Bearer "):
@@ -203,9 +209,32 @@ def _require_auth(authorization: Optional[str]) -> None:
 def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
     _require_auth(authorization)
 
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    from db import supabase
+
+    return HealthResponse(
+        status="ok",
+        scope="public",
+        supabase_configured=bool(supabase),
+    )
+
+
+@app.get("/healthz", response_model=HealthResponse, dependencies=[Depends(require_auth)])
+async def health_check_authenticated():
+    from db import supabase
+
+    return HealthResponse(
+        status="ok",
+        scope="authenticated",
+        supabase_configured=bool(supabase),
+    )
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
-    # Allow unauthenticated reads ONLY when the client can be served from cache directly.
+    _require_auth(authorization)
     if req.commit_sha:
         try:
             _supabase, cached_result = _fetch_cached_analysis_or_404_service_aware(
@@ -219,11 +248,9 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
             cached_payload.pop("_cache_package_path", None)
             return AnalyzeResponse(**cached_payload)
         except HTTPException as e:
-            # Only fall back to live compute when authenticated.
             if e.status_code != 404:
                 raise
 
-    _require_auth(authorization)
     tracker = TokenTracker()
     
     initial_state = {
@@ -290,8 +317,8 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
     return response
 
 
-@app.post("/examples/seed", response_model=SeedExampleBankResponse)
-async def seed_example_bank(req: SeedExampleBankRequest, _auth: None = Depends(require_auth)):
+@app.post("/examples/seed", response_model=SeedExampleBankResponse, dependencies=[Depends(require_auth)])
+async def seed_example_bank(req: SeedExampleBankRequest):
     result = seed_example_bank_from_repos(
         repo_urls=req.repo_urls,
         github_token=req.github_token,
@@ -301,8 +328,8 @@ async def seed_example_bank(req: SeedExampleBankRequest, _auth: None = Depends(r
     return SeedExampleBankResponse(**result)
 
 
-@app.post("/examples/seed/popular", response_model=SeedExampleBankResponse)
-async def seed_example_bank_popular(github_token: Optional[str] = None, _auth: None = Depends(require_auth)):
+@app.post("/examples/seed/popular", response_model=SeedExampleBankResponse, dependencies=[Depends(require_auth)])
+async def seed_example_bank_popular(github_token: Optional[str] = None):
     result = seed_example_bank_from_repos(
         repo_urls=POPULAR_EXAMPLE_REPOS,
         github_token=github_token,
@@ -312,7 +339,7 @@ async def seed_example_bank_popular(github_token: Optional[str] = None, _auth: N
     return SeedExampleBankResponse(**result)
 
 
-@app.post("/examples/preview", response_model=PreviewExamplesResponse)
+@app.post("/examples/preview", response_model=PreviewExamplesResponse, dependencies=[Depends(require_auth)])
 async def preview_example_bank_matches(req: PreviewExamplesRequest):
     if req.artifact_type not in {"dockerfile", "compose"}:
         raise HTTPException(status_code=400, detail="artifact_type must be 'dockerfile' or 'compose'")
@@ -327,8 +354,8 @@ async def preview_example_bank_matches(req: PreviewExamplesRequest):
     return PreviewExamplesResponse(examples=examples)
 
 
-@app.delete("/cache", response_model=DeleteCacheResponse)
-async def delete_cached_analysis(req: DeleteCacheRequest, _auth: None = Depends(require_auth)):
+@app.delete("/cache", response_model=DeleteCacheResponse, dependencies=[Depends(require_auth)])
+async def delete_cached_analysis(req: DeleteCacheRequest):
     from db import supabase
 
     if not supabase:
@@ -492,6 +519,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
 
     # Decide auth vs cache BEFORE starting the streaming response. If we raise after
     # the stream begins, Starlette can crash with "response already started."
+    _require_auth(authorization)
     if req.commit_sha:
         try:
             _supabase, cached_result = _fetch_cached_analysis_or_404_service_aware(
@@ -512,12 +540,11 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
             if e.status_code != 404:
                 raise
 
-    _require_auth(authorization)
     return StreamingResponse(live_event_generator(), media_type="text/event-stream")
 
 
-@app.post("/feedback", response_model=AnalyzeResponse)
-async def improve_with_feedback(req: FeedbackRequest, _auth: None = Depends(require_auth)):
+@app.post("/feedback", response_model=AnalyzeResponse, dependencies=[Depends(require_auth)])
+async def improve_with_feedback(req: FeedbackRequest):
     from graph.feedback import run_feedback_improvement
 
     # 1. Fetch existing cached analysis
@@ -569,8 +596,8 @@ async def improve_with_feedback(req: FeedbackRequest, _auth: None = Depends(requ
     return response
 
 
-@app.post("/feedback/stream")
-async def improve_with_feedback_stream(req: FeedbackRequest, _auth: None = Depends(require_auth)):
+@app.post("/feedback/stream", dependencies=[Depends(require_auth)])
+async def improve_with_feedback_stream(req: FeedbackRequest):
     async def event_generator():
         from graph.feedback import feedback_graph, build_feedback_initial_state, format_feedback_result
 
@@ -643,14 +670,14 @@ async def improve_with_feedback_stream(req: FeedbackRequest, _auth: None = Depen
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-@app.get("/templates")
+@app.get("/templates", dependencies=[Depends(require_auth)])
 async def get_templates(active_only: bool = True):
     templates = list_templates(active_only=active_only)
     return {"templates": templates}
 
 
-@app.post("/templates")
-async def create_or_update_template(req: TemplateRequest, _auth: None = Depends(require_auth)):
+@app.post("/templates", dependencies=[Depends(require_auth)])
+async def create_or_update_template(req: TemplateRequest):
     try:
         result = upsert_template(req.model_dump() if hasattr(req, 'model_dump') else req.dict())
         return result
@@ -660,14 +687,14 @@ async def create_or_update_template(req: TemplateRequest, _auth: None = Depends(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/templates/seed", response_model=TemplateSeedResponse)
-async def seed_templates(_auth: None = Depends(require_auth)):
+@app.post("/templates/seed", response_model=TemplateSeedResponse, dependencies=[Depends(require_auth)])
+async def seed_templates():
     result = seed_default_templates()
     return TemplateSeedResponse(**result)
 
 
-@app.delete("/templates/{name}")
-async def remove_template(name: str, _auth: None = Depends(require_auth)):
+@app.delete("/templates/{name}", dependencies=[Depends(require_auth)])
+async def remove_template(name: str):
     try:
         deleted = delete_template(name)
         if not deleted:

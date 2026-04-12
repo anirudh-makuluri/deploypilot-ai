@@ -189,6 +189,36 @@ def test_analyze_returns_400_on_graph_error(monkeypatch):
     assert response.json()["detail"] == "scan failed"
 
 
+def test_health_endpoint_reports_basic_configuration(monkeypatch):
+    monkeypatch.setenv("SD_API_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(db_module, "supabase", FakeSupabase())
+
+    response = _client().get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "scope": "public",
+        "supabase_configured": True,
+    }
+
+
+def test_authenticated_health_endpoint_requires_valid_token(monkeypatch):
+    _set_auth(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", FakeSupabase())
+
+    unauthorized = _client().get("/healthz")
+    authorized = _client().get("/healthz", headers=_auth_headers())
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 200
+    assert authorized.json() == {
+        "status": "ok",
+        "scope": "authenticated",
+        "supabase_configured": True,
+    }
+
+
 def test_analyze_returns_cached_payload_with_commit_sha_backfill(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
@@ -340,10 +370,24 @@ def test_examples_seed_popular_uses_builtin_list(monkeypatch):
     assert called["permissive_only"] is True
 
 
-def test_examples_preview_rejects_invalid_artifact_type():
+def test_examples_preview_requires_auth(monkeypatch):
+    _set_auth(monkeypatch)
+
+    response = _client().post(
+        "/examples/preview",
+        json={"artifact_type": "dockerfile", "detected_stack": "FastAPI", "limit": 2},
+    )
+
+    assert response.status_code == 401
+
+
+def test_examples_preview_rejects_invalid_artifact_type(monkeypatch):
+    _set_auth(monkeypatch)
+
     response = _client().post(
         "/examples/preview",
         json={"artifact_type": "nginx", "detected_stack": "FastAPI", "limit": 2},
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 400
@@ -351,6 +395,7 @@ def test_examples_preview_rejects_invalid_artifact_type():
 
 
 def test_examples_preview_success(monkeypatch):
+    _set_auth(monkeypatch)
     called = {}
 
     def fake_fetch(**kwargs):
@@ -367,6 +412,7 @@ def test_examples_preview_success(monkeypatch):
             "service": {"name": "api", "build_context": "."},
             "limit": 2,
         },
+        headers=_auth_headers(),
     )
 
     assert response.status_code == 200
@@ -570,7 +616,7 @@ def test_analyze_stream_emits_error_for_top_level_exception(monkeypatch):
     assert events[0][0] == "error"
     assert "boom" in events[0][1]["detail"]
 
-def test_analyze_allows_unauthenticated_cache_only_when_commit_sha_provided(monkeypatch):
+def test_analyze_rejects_unauthenticated_even_for_cached_commit(monkeypatch):
     _set_auth(monkeypatch)
     _set_common_mocks(monkeypatch)
     monkeypatch.setattr(
@@ -601,13 +647,9 @@ def test_analyze_allows_unauthenticated_cache_only_when_commit_sha_provided(monk
     response = _client().post(
         "/analyze",
         json={"repo_url": "https://github.com/acme/repo", "commit_sha": "sha-cached"},
-        # no auth header on purpose
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["commit_sha"] == "sha-cached"
-    assert payload["stack_summary"] == "FastAPI"
+    assert response.status_code == 401
 
 
 def test_analyze_rejects_unauthenticated_when_cache_missing(monkeypatch):
