@@ -126,6 +126,26 @@ The main analysis request supports:
 
 `package_path` and `service_name` are especially useful for monorepos, where you may want to analyze one package or one deployable service instead of the whole repository.
 
+### Scope Guard for Large Monorepos
+
+When a request targets root scope (`package_path = "."`) without `service_name`, the scanner can reject overly broad repositories and ask clients to narrow scope.
+
+- Trigger defaults:
+  - `tree_entry_count > 3000`, or
+  - `candidate_package_count > 20`
+- Response: `400` with structured `detail`:
+  - `code = "scope_required"`
+  - `reason`
+  - `suggested_package_paths`
+  - `suggested_service_names`
+
+Configure via env vars:
+
+- `SD_SCOPE_GUARD_ENABLED` (default: `true`)
+- `SD_SCOPE_GUARD_TREE_THRESHOLD` (default: `3000`)
+- `SD_SCOPE_GUARD_PACKAGE_THRESHOLD` (default: `20`)
+- `SD_FETCH_MARKDOWN` (default: `false`) to keep live scans focused on deploy-relevant files.
+
 ## API Overview
 
 Main analysis and remediation:

@@ -11,73 +11,13 @@ class FakeResponse:
         return self._payload
 
 
-def test_fetch_repo_structure_includes_relevant_markdown_docs(monkeypatch):
-    # For non-root package_path, the implementation now uses targeted subtree navigation
-    # instead of a full recursive tree fetch (avoids truncation on large monorepos).
-    repo_api = "https://api.github.com/repos/owner/repo"
-    root_tree_api = "https://api.github.com/repos/owner/repo/git/trees/main"
-    apps_tree_api = "https://api.github.com/repos/owner/repo/git/trees/apps-sha"
-    web_subtree_api = "https://api.github.com/repos/owner/repo/git/trees/web-sha?recursive=1"
-    ref_api = "https://api.github.com/repos/owner/repo/git/ref/heads/main"
-    raw_package_readme = "https://raw.githubusercontent.com/owner/repo/main/apps/web/README.md"
-    raw_package_deploy = "https://raw.githubusercontent.com/owner/repo/main/apps/web/deployment.md"
-    raw_package_json = "https://raw.githubusercontent.com/owner/repo/main/apps/web/package.json"
+def test_minimal_fetch_skips_markdown_by_default(monkeypatch):
+    monkeypatch.delenv("SD_FETCH_MARKDOWN", raising=False)
 
-    responses = {
-        repo_api: FakeResponse(200, {"full_name": "owner/repo", "default_branch": "main", "language": "TypeScript"}),
-        # Step 1: root tree (non-recursive) — just needs the 'apps' directory entry
-        root_tree_api: FakeResponse(200, {"tree": [
-            {"path": "README.md", "type": "blob"},
-            {"path": "docs", "type": "tree", "sha": "docs-sha"},
-            {"path": "apps", "type": "tree", "sha": "apps-sha"},
-        ]}),
-        # Step 2: apps-level tree (non-recursive) — needs the 'web' directory entry
-        apps_tree_api: FakeResponse(200, {"tree": [
-            {"path": "web", "type": "tree", "sha": "web-sha"},
-        ]}),
-        # Step 3: web subtree (recursive) — paths are relative to apps/web/
-        web_subtree_api: FakeResponse(200, {"tree": [
-            {"path": "README.md", "type": "blob"},
-            {"path": "deployment.md", "type": "blob"},
-            {"path": "docs", "type": "tree"},
-            {"path": "docs/notes.md", "type": "blob"},
-            {"path": "package.json", "type": "blob"},
-        ]}),
-        ref_api: FakeResponse(200, {"object": {"sha": "abc123"}}),
-        raw_package_readme: FakeResponse(200, text="# Package README"),
-        raw_package_deploy: FakeResponse(200, text="# Deploy"),
-        raw_package_json: FakeResponse(200, text='{"name":"web"}'),
-    }
-
-    def fake_get(url, headers=None):
-        if url not in responses:
-            raise AssertionError(f"Unexpected URL requested: {url}")
-        return responses[url]
-
-    monkeypatch.setattr("tools.github_tools.requests.get", fake_get)
-
-    result = fetch_repo_structure_impl(
-        repo_url="https://github.com/owner/repo",
-        github_token="token",
-        max_files=10,
-        package_path="apps/web",
-    )
-
-    assert result["commit_sha"] == "abc123"
-    assert "apps/web/README.md" in result["key_files"]
-    assert "apps/web/deployment.md" in result["key_files"]
-    assert "apps/web/package.json" in result["key_files"]
-    assert "README.md" not in result["key_files"]
-    assert "docs/architecture.md" not in result["key_files"]
-    assert "apps/web/docs/notes.md" not in result["key_files"]
-
-
-def test_fetch_repo_structure_includes_root_markdown_docs_for_root_package(monkeypatch):
     repo_api = "https://api.github.com/repos/owner/repo"
     tree_api = "https://api.github.com/repos/owner/repo/git/trees/main?recursive=1"
     ref_api = "https://api.github.com/repos/owner/repo/git/ref/heads/main"
     raw_root_readme = "https://raw.githubusercontent.com/owner/repo/main/README.md"
-    raw_root_setup = "https://raw.githubusercontent.com/owner/repo/main/setup.md"
     raw_package_json = "https://raw.githubusercontent.com/owner/repo/main/package.json"
 
     responses = {
@@ -87,19 +27,18 @@ def test_fetch_repo_structure_includes_root_markdown_docs_for_root_package(monke
             {
                 "tree": [
                     {"path": "README.md", "type": "blob"},
-                    {"path": "setup.md", "type": "blob"},
-                    {"path": "docs/overview.md", "type": "blob"},
                     {"path": "package.json", "type": "blob"},
                 ]
             },
         ),
-        ref_api: FakeResponse(200, {"object": {"sha": "rootsha"}}),
-        raw_root_readme: FakeResponse(200, text="# Root README"),
-        raw_root_setup: FakeResponse(200, text="# Setup"),
+        ref_api: FakeResponse(200, {"object": {"sha": "abc123"}}),
         raw_package_json: FakeResponse(200, text='{"name":"root-app"}'),
     }
 
+    requested_urls = []
+
     def fake_get(url, headers=None):
+        requested_urls.append(url)
         if url not in responses:
             raise AssertionError(f"Unexpected URL requested: {url}")
         return responses[url]
@@ -113,7 +52,67 @@ def test_fetch_repo_structure_includes_root_markdown_docs_for_root_package(monke
         package_path=".",
     )
 
-    assert "README.md" in result["key_files"]
-    assert "setup.md" in result["key_files"]
+    assert result["commit_sha"] == "abc123"
     assert "package.json" in result["key_files"]
-    assert "docs/overview.md" not in result["key_files"]
+    assert "README.md" not in result["key_files"]
+    assert raw_root_readme not in requested_urls
+
+
+def test_minimal_fetch_includes_required_deploy_files(monkeypatch):
+    monkeypatch.delenv("SD_FETCH_MARKDOWN", raising=False)
+
+    repo_api = "https://api.github.com/repos/owner/repo"
+    tree_api = "https://api.github.com/repos/owner/repo/git/trees/main?recursive=1"
+    ref_api = "https://api.github.com/repos/owner/repo/git/ref/heads/main"
+    raw_pkg = "https://raw.githubusercontent.com/owner/repo/main/package.json"
+    raw_reqs = "https://raw.githubusercontent.com/owner/repo/main/requirements.txt"
+    raw_compose = "https://raw.githubusercontent.com/owner/repo/main/docker-compose.yml"
+    raw_nginx = "https://raw.githubusercontent.com/owner/repo/main/nginx.conf"
+
+    responses = {
+        repo_api: FakeResponse(200, {"full_name": "owner/repo", "default_branch": "main", "language": "Python"}),
+        tree_api: FakeResponse(
+            200,
+            {
+                "tree": [
+                    {"path": "package.json", "type": "blob"},
+                    {"path": "requirements.txt", "type": "blob"},
+                    {"path": "docker-compose.yml", "type": "blob"},
+                    {"path": "nginx.conf", "type": "blob"},
+                    {"path": "README.md", "type": "blob"},
+                    {"path": "apps", "type": "tree"},
+                    {"path": "apps/web", "type": "tree"},
+                    {"path": "apps/web/package.json", "type": "blob"},
+                ]
+            },
+        ),
+        ref_api: FakeResponse(200, {"object": {"sha": "rootsha"}}),
+        raw_pkg: FakeResponse(200, text='{"name":"root"}'),
+        raw_reqs: FakeResponse(200, text="fastapi==0.116.0"),
+        raw_compose: FakeResponse(200, text="services:\n  api:\n    build: .\n"),
+        raw_nginx: FakeResponse(200, text="events {}\nhttp {}"),
+        "https://raw.githubusercontent.com/owner/repo/main/apps/web/package.json": FakeResponse(200, text='{"name":"web"}'),
+    }
+
+    def fake_get(url, headers=None):
+        if url not in responses:
+            raise AssertionError(f"Unexpected URL requested: {url}")
+        return responses[url]
+
+    monkeypatch.setattr("tools.github_tools.requests.get", fake_get)
+
+    result = fetch_repo_structure_impl(
+        repo_url="https://github.com/owner/repo",
+        github_token="token",
+        max_files=50,
+        package_path=".",
+    )
+
+    assert "package.json" in result["key_files"]
+    assert "requirements.txt" in result["key_files"]
+    assert "docker-compose.yml" in result["key_files"]
+    assert "nginx.conf" in result["key_files"]
+    assert "README.md" not in result["key_files"]
+    assert result["tree_entry_count"] == 8
+    assert result["candidate_package_paths"] == [".", "apps/web"]
+    assert "web" in result["candidate_service_hints"]

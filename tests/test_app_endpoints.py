@@ -759,3 +759,241 @@ def test_feedback_stream_emits_error_when_cache_missing(monkeypatch):
     assert len(events) == 1
     assert events[0][0] == "error"
     assert "No cached analysis found" in events[0][1]["detail"]
+
+
+class _FakeFetchTool:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def invoke(self, _args):
+        return dict(self.payload)
+
+
+def _install_fake_scanner(monkeypatch, scan_payload):
+    import graph.nodes.scanner as scanner_module
+
+    monkeypatch.setattr(scanner_module, "fetch_repo_structure", _FakeFetchTool(scan_payload))
+
+
+def test_analyze_rejects_broad_root_scope_with_suggestions(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "3000")
+    monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "20")
+
+    _install_fake_scanner(
+        monkeypatch,
+        {
+            "repo_full_name": "acme/repo",
+            "default_branch": "main",
+            "commit_sha": "sha-1",
+            "language": "TypeScript",
+            "key_files": {},
+            "dirs": [],
+            "tree_entry_count": 5200,
+            "candidate_package_paths": [f"apps/app-{i}" for i in range(1, 26)],
+            "candidate_service_hints": ["api", "web", "worker"],
+        },
+    )
+
+    def fake_invoke(initial_state, config=None):
+        import graph.nodes.scanner as scanner_module
+
+        return scanner_module.scanner_node(dict(initial_state))
+
+    monkeypatch.setattr(app_module.graph, "invoke", fake_invoke)
+
+    response = _client().post(
+        "/analyze",
+        json={"repo_url": "https://github.com/acme/repo", "package_path": "."},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "scope_required"
+    assert detail["tree_entry_count"] == 5200
+    assert len(detail["suggested_package_paths"]) == 10
+    assert detail["suggested_service_names"] == ["api", "web", "worker"]
+
+
+def test_analyze_stream_emits_scope_required_error_event(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "3000")
+    monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "20")
+
+    _install_fake_scanner(
+        monkeypatch,
+        {
+            "repo_full_name": "acme/repo",
+            "default_branch": "main",
+            "commit_sha": "sha-1",
+            "language": "TypeScript",
+            "key_files": {},
+            "dirs": [],
+            "tree_entry_count": 4100,
+            "candidate_package_paths": [f"services/svc-{i}" for i in range(1, 30)],
+            "candidate_service_hints": ["api", "frontend"],
+        },
+    )
+
+    async def fake_astream(initial_state, config=None):
+        import graph.nodes.scanner as scanner_module
+
+        state = scanner_module.scanner_node(dict(initial_state))
+        if state.get("error"):
+            yield {"scanner": {"error": state["error"]}}
+            return
+        yield {"scanner": state}
+
+    monkeypatch.setattr(app_module.graph, "astream", fake_astream)
+
+    response = _client().post(
+        "/analyze/stream",
+        json={"repo_url": "https://github.com/acme/repo", "package_path": "."},
+        headers=_auth_headers(),
+    )
+
+    events = _parse_sse(response.text)
+    assert events[0][0] == "progress"
+    assert events[1][0] == "error"
+    assert events[1][1]["detail"]["code"] == "scope_required"
+    assert len(events[1][1]["detail"]["suggested_package_paths"]) == 10
+
+
+def test_scoped_package_path_bypasses_scope_guard(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
+
+    _install_fake_scanner(
+        monkeypatch,
+        {
+            "repo_full_name": "acme/repo",
+            "default_branch": "main",
+            "commit_sha": "sha-2",
+            "language": "TypeScript",
+            "key_files": {},
+            "dirs": [],
+            "tree_entry_count": 7000,
+            "candidate_package_paths": [f"apps/app-{i}" for i in range(1, 40)],
+            "candidate_service_hints": ["dashboard"],
+        },
+    )
+
+    def fake_invoke(initial_state, config=None):
+        import graph.nodes.scanner as scanner_module
+
+        state = scanner_module.scanner_node(dict(initial_state))
+        if state.get("error"):
+            return state
+        state.update(
+            {
+                "detected_stack": "Next.js",
+                "stack_tokens": ["next", "react"],
+                "services": [{"name": "dashboard", "build_context": "apps/dashboard", "port": 3000}],
+                "dockerfiles": {"apps/dashboard/Dockerfile": "FROM node:20"},
+                "risks": [],
+                "confidence": 0.9,
+            }
+        )
+        return state
+
+    monkeypatch.setattr(app_module.graph, "invoke", fake_invoke)
+
+    response = _client().post(
+        "/analyze",
+        json={"repo_url": "https://github.com/acme/repo", "package_path": "apps/dashboard"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["commit_sha"] == "sha-2"
+
+
+def test_service_name_bypasses_scope_guard_when_unique(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(db_module, "supabase", None)
+    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
+
+    _install_fake_scanner(
+        monkeypatch,
+        {
+            "repo_full_name": "acme/repo",
+            "default_branch": "main",
+            "commit_sha": "sha-3",
+            "language": "TypeScript",
+            "key_files": {},
+            "dirs": [],
+            "tree_entry_count": 9000,
+            "candidate_package_paths": [f"apps/app-{i}" for i in range(1, 45)],
+            "candidate_service_hints": ["api", "worker"],
+        },
+    )
+
+    def fake_invoke(initial_state, config=None):
+        import graph.nodes.scanner as scanner_module
+
+        state = scanner_module.scanner_node(dict(initial_state))
+        if state.get("error"):
+            return state
+        state.update(
+            {
+                "detected_stack": "FastAPI",
+                "stack_tokens": ["python", "fastapi"],
+                "services": [{"name": "api", "build_context": "services/api", "port": 8000}],
+                "dockerfiles": {"services/api/Dockerfile": "FROM python:3.11"},
+                "risks": [],
+                "confidence": 0.87,
+            }
+        )
+        return state
+
+    monkeypatch.setattr(app_module.graph, "invoke", fake_invoke)
+
+    response = _client().post(
+        "/analyze",
+        json={"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": "api"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["services"][0]["name"] == "api"
+
+
+def test_scope_guard_threshold_env_overrides(monkeypatch):
+    monkeypatch.setattr(db_module, "supabase", None)
+    _install_fake_scanner(
+        monkeypatch,
+        {
+            "repo_full_name": "acme/repo",
+            "default_branch": "main",
+            "commit_sha": "sha-4",
+            "language": "TypeScript",
+            "key_files": {},
+            "dirs": [],
+            "tree_entry_count": 5000,
+            "candidate_package_paths": [f"apps/app-{i}" for i in range(1, 30)],
+            "candidate_service_hints": ["api"],
+        },
+    )
+
+    import graph.nodes.scanner as scanner_module
+
+    monkeypatch.setenv("SD_SCOPE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "10000")
+    monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "100")
+    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": None})
+    assert "error" not in state
+
+    monkeypatch.setenv("SD_SCOPE_GUARD_TREE_THRESHOLD", "100")
+    monkeypatch.setenv("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", "2")
+    state = scanner_module.scanner_node({"repo_url": "https://github.com/acme/repo", "package_path": ".", "service_name": None})
+    assert state["error"]["code"] == "scope_required"

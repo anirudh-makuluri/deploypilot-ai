@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import os
 from tools.github_tools import fetch_repo_structure
 from db import supabase
 
@@ -118,6 +119,57 @@ def _normalize_service_name(value: str | None) -> str | None:
     return normalized or None
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+        return max(minimum, value)
+    except ValueError:
+        return default
+
+
+def _maybe_build_scope_guard_error(scan: Dict[str, Any], package_path: str, service_name: str | None) -> Dict[str, Any] | None:
+    if not _env_bool("SD_SCOPE_GUARD_ENABLED", True):
+        return None
+    if _normalize_package_path(package_path) != ".":
+        return None
+    if _normalize_service_name(service_name):
+        return None
+
+    tree_threshold = _env_int("SD_SCOPE_GUARD_TREE_THRESHOLD", 3000)
+    package_threshold = _env_int("SD_SCOPE_GUARD_PACKAGE_THRESHOLD", 20)
+    tree_count = int(scan.get("tree_entry_count") or 0)
+    candidate_paths = scan.get("candidate_package_paths") or []
+    if not isinstance(candidate_paths, list):
+        candidate_paths = []
+    candidate_count = len(candidate_paths)
+
+    if tree_count <= tree_threshold and candidate_count <= package_threshold:
+        return None
+
+    service_hints = scan.get("candidate_service_hints") or []
+    if not isinstance(service_hints, list):
+        service_hints = []
+
+    return {
+        "code": "scope_required",
+        "reason": (
+            "Repository scope is too broad for root analysis. "
+            "Specify package_path or service_name to narrow analysis."
+        ),
+        "tree_entry_count": tree_count,
+        "candidate_package_count": candidate_count,
+        "suggested_package_paths": candidate_paths[:10],
+        "suggested_service_names": service_hints[:10],
+    }
+
+
 def _filter_cached_response_for_service(cached: Dict[str, Any], service_name: str | None) -> Dict[str, Any] | None:
     """Filter a cached analysis payload down to a single requested service.
 
@@ -209,6 +261,16 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     state["commit_sha"] = commit_sha
     requested_package_path = _normalize_package_path(state.get("package_path", "."))
     requested_service_name = _normalize_service_name(state.get("service_name"))
+
+    scope_guard_error = _maybe_build_scope_guard_error(
+        scan=scan,
+        package_path=requested_package_path,
+        service_name=requested_service_name,
+    )
+    if scope_guard_error:
+        state["error"] = scope_guard_error
+        state["repo_scan"] = scan
+        return state
     
     if supabase and commit_sha != "unknown":
         for attempt in range(3):

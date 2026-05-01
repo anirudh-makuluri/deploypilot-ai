@@ -84,6 +84,26 @@ Request fields:
 - `service_name`: optional service selector within the chosen scope.
 - `commit_sha`: optional cache key for cache-first retrieval.
 
+Scope guard behavior (large monorepos):
+
+- Root-scope requests (`package_path = "."`) without `service_name` may return `400` when repo breadth is too high.
+- The error shape is structured to help clients retry with narrower scope.
+
+Representative scope guard error:
+
+```json
+{
+  "detail": {
+    "code": "scope_required",
+    "reason": "Repository scope is too broad for root analysis. Specify package_path or service_name to narrow analysis.",
+    "tree_entry_count": 5200,
+    "candidate_package_count": 26,
+    "suggested_package_paths": ["apps/web", "services/api"],
+    "suggested_service_names": ["web", "api"]
+  }
+}
+```
+
 Representative response:
 
 ```json
@@ -168,6 +188,8 @@ Possible event types:
 - `progress`
 - `complete`
 - `error`
+
+When scope guard triggers in streaming mode, the `error` event includes the same structured `detail` object as the JSON endpoint.
 
 ## Feedback Remediation
 
