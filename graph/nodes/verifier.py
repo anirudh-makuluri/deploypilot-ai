@@ -170,7 +170,11 @@ def _filter_risks(
                 continue
 
         # Drop any risks focused on environment variable management; env var handling is left to deploy-time configuration.
-        if "environment variable" in lowered or "env var" in lowered or "environment variables" in lowered:
+        if (
+            ("environment variable" in lowered or "env var" in lowered or "environment variables" in lowered)
+            and "secret management" not in lowered
+            and "sensitive credentials" not in lowered
+        ):
             continue
 
         # Suppress websocket hardening warnings when required proxy headers are present.
@@ -197,6 +201,8 @@ def _compute_deterministic_confidence(
     docker_compose: str,
     nginx_conf: str,
     risks: List[str],
+    build_verification: Dict[str, Any] | None = None,
+    preflight_issues: List[str] | None = None,
     package_path: str = ".",
 ) -> float:
     """Compute confidence from final artifacts and filtered risks without LLM score dependence."""
@@ -244,6 +250,17 @@ def _compute_deterministic_confidence(
 
     # Final filtered risks directly reduce confidence.
     score -= min(0.6, 0.12 * len(risks))
+    if preflight_issues:
+        score -= min(0.45, 0.2 * len(preflight_issues))
+
+    # Railpack build verification has strong signal value for real-world buildability.
+    build_status = str((build_verification or {}).get("status", "")).strip().lower()
+    if build_status == "failed":
+        score -= 0.35
+    elif build_status == "error":
+        score -= 0.4
+    elif build_status == "unavailable":
+        score -= 0.1
 
     # Keep confidence in a practical range and stable for API consumers.
     bounded = max(0.1, min(0.99, score))
@@ -257,6 +274,8 @@ def verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[
     docker_compose = state.get("docker_compose", "")
     nginx_conf = state.get("nginx_conf", "")
     package_path = state.get("package_path", ".")
+    build_verification = state.get("build_verification", {})
+    preflight_issues = [str(x) for x in state.get("preflight_issues", []) if str(x).strip()]
 
     hadolint_results = {}
     for service, content in dockerfiles.items():
@@ -284,6 +303,12 @@ GENERATED DOCKER-COMPOSE:
 
 GENERATED NGINX CONFIG:
 {nginx_conf}
+
+RAILPACK BUILD VERIFICATION:
+{json.dumps(build_verification, indent=2)}
+
+PREFLIGHT STATIC CHECK ISSUES:
+{json.dumps(preflight_issues, indent=2)}
 
 Review for:
 1. Port consistency — do Dockerfiles EXPOSE the same ports referenced in compose and nginx?
@@ -318,6 +343,14 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             nginx_conf,
             package_path=package_path,
         )
+        build_status = str(build_verification.get("status", "")).strip().lower()
+        if build_status in {"failed", "error"}:
+            filtered_risks.append(
+                f"Railpack build verification {build_status}: {build_verification.get('message', 'no message provided')}"
+            )
+        elif build_status == "unavailable":
+            filtered_risks.append("Railpack build verification unavailable on this host.")
+        filtered_risks.extend(preflight_issues)
         state["risks"] = filtered_risks
         state["confidence"] = _compute_deterministic_confidence(
             services=services,
@@ -325,6 +358,8 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             docker_compose=docker_compose,
             nginx_conf=nginx_conf,
             risks=filtered_risks,
+            build_verification=build_verification,
+            preflight_issues=preflight_issues,
             package_path=package_path,
         )
         state["llm_confidence_raw"] = result.confidence

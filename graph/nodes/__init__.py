@@ -5,6 +5,8 @@ from .commands_generator import commands_generator_node
 from .compose_generator import compose_generator_node
 from .nginx_generator import nginx_generator_node
 from .verifier import verifier_node
+from .build_verify import build_verify_node
+from .preflight import preflight_node
 
 __all__ = [
     "scanner_node",
@@ -14,4 +16,6 @@ __all__ = [
     "compose_generator_node",
     "nginx_generator_node",
     "verifier_node",
+    "build_verify_node",
+    "preflight_node",
 ]

@@ -8,7 +8,9 @@ from .nodes import (
     commands_generator_node,
     compose_generator_node,
     nginx_generator_node,
-    verifier_node
+    verifier_node,
+    build_verify_node,
+    preflight_node,
 )
 
 # State is a plain dict
@@ -21,6 +23,8 @@ workflow.add_node("docker_gen", dockerfile_generator_node)
 workflow.add_node("compose_gen", compose_generator_node)
 workflow.add_node("nginx_gen", nginx_generator_node)
 workflow.add_node("verifier", verifier_node)
+workflow.add_node("build_verify", build_verify_node)
+workflow.add_node("preflight", preflight_node)
 
 
 # ─── Conditional Edges ──────────────────────────────────────────────────────────
@@ -60,6 +64,16 @@ def check_compose_required(state: Dict[str, Any]) -> str:
     return "compose"
 
 
+def is_build_verify_enabled() -> bool:
+    import os
+    raw = os.getenv("SD_RAILPACK_VERIFY_ENABLED", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def check_build_verify_required(_state: Dict[str, Any]) -> str:
+    return "verify" if is_build_verify_enabled() else "skip"
+
+
 # Entry point
 workflow.set_entry_point("scanner")
 
@@ -83,7 +97,7 @@ workflow.add_conditional_edges(
     },
 )
 
-# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> verifier -> END
+# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> (optional build_verify) -> preflight -> verifier -> END
 workflow.add_edge("commands_gen", "docker_gen")
 workflow.add_conditional_edges(
     "docker_gen",
@@ -95,6 +109,16 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("compose_gen", "nginx_gen")
 workflow.add_edge("nginx_gen", "verifier")
+workflow.add_conditional_edges(
+    "nginx_gen",
+    check_build_verify_required,
+    {
+        "verify": "build_verify",
+        "skip": "preflight",
+    },
+)
+workflow.add_edge("build_verify", "preflight")
+workflow.add_edge("preflight", "verifier")
 workflow.add_edge("verifier", END)
 
 graph = workflow.compile()

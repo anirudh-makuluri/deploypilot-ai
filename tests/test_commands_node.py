@@ -56,3 +56,24 @@ def test_commands_node_prefers_package_scripts_when_available():
     assert svc_cmds["install"] == "pnpm install --frozen-lockfile"
     assert svc_cmds["build"] == "pnpm build"
     assert svc_cmds["run"] == "pnpm start"
+
+
+def test_commands_node_emits_docker_build_contract():
+    state = {
+        "services": [
+            {
+                "name": "web",
+                "build_context": ".",
+                "dockerfile_path": "apps/web/Dockerfile",
+                "execution_root": ".",
+                "port": 3000,
+            },
+        ],
+        "stack_tokens": ["node", "vite"],
+        "repo_scan": {"key_files": {}},
+    }
+
+    out = commands_generator_node(state)
+    svc_cmds = out["commands"]["by_service"]["web"]
+    assert svc_cmds["docker_build"] == "docker build -f apps/web/Dockerfile ."
+    assert svc_cmds["execution_root"] == "."

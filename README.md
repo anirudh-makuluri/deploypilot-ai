@@ -12,6 +12,7 @@ The project is built around a LangGraph workflow and supports both one-shot JSON
 - Generates `docker-compose.yml` only when multiple app services need orchestration.
 - Generates an `nginx.conf` for reverse proxying and route handling.
 - Verifies output with hadolint plus deterministic risk and confidence checks.
+- Optionally runs a Railpack build verification pass (`SD_RAILPACK_VERIFY_ENABLED=true`) to validate buildability.
 - Caches analysis results in Supabase by `repo_url + commit_sha + package_path + service_name`.
 - Supports feedback-driven regeneration against an existing cached analysis.
 - Supports example-bank retrieval and Dockerfile template management in Supabase.
@@ -28,7 +29,11 @@ graph TD
     Docker -->|Multi-service| Compose["Compose generator"]
     Docker -->|Single-service| Nginx["Nginx generator"]
     Compose --> Nginx
-    Nginx --> Verify["Verifier"]
+    Nginx --> Railpack{"Railpack verify enabled?"}
+    Railpack -->|Yes| BuildVerify["Railpack build verify"]
+    Railpack -->|No| Preflight["COPY/context preflight"]
+    BuildVerify --> Preflight
+    Preflight --> Verify
     Verify --> Save["Save to cache"]
     ReturnCache --> End(("End"))
     Save --> End
@@ -145,6 +150,15 @@ Configure via env vars:
 - `SD_SCOPE_GUARD_TREE_THRESHOLD` (default: `3000`)
 - `SD_SCOPE_GUARD_PACKAGE_THRESHOLD` (default: `20`)
 - `SD_FETCH_MARKDOWN` (default: `false`) to keep live scans focused on deploy-relevant files.
+- `SD_RAILPACK_VERIFY_ENABLED` (default: `false`) to run post-generation Railpack build verification.
+- `SD_RAILPACK_VERIFY_TIMEOUT_SECONDS` (default: `300`) timeout for the verification build.
+- `SD_RAILPACK_VERIFY_MAX_LOG_CHARS` (default: `8000`) max captured log excerpt in API response.
+- `SD_PREFLIGHT_STRICT` (default: `true`) fail-fast when static Dockerfile/context preflight finds issues.
+
+Each service now carries a deterministic build contract:
+- `dockerfile_path`: which Dockerfile to use
+- `build_context`: context path passed to `docker build`
+- `execution_root`: where to run the command (currently always repo root `"."`)
 
 ## API Overview
 
@@ -171,8 +185,6 @@ Template operations:
 - `POST /templates`
 - `POST /templates/seed`
 - `DELETE /templates/{name}`
-
-Detailed examples live in [docs/api-examples.md](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/docs/api-examples.md).
 
 ## Response Shape
 

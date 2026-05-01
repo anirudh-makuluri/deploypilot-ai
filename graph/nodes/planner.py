@@ -19,6 +19,7 @@ class ServiceInfo(BaseModel):
     build_context: str = Field(description="Relative path to the service's build context, e.g. '.', './ws-server'")
     port: int = Field(description="The HTTP port the service listens on")
     dockerfile_path: str = Field(default="", description="Path to the existing Dockerfile for this service if one exists in key_files (e.g. 'Dockerfile', 'Dockerfile.websocket'). Empty string if no existing Dockerfile.")
+    execution_root: str = Field(default=".", description="Directory from which docker build should be executed. Always repo root '.' for stable behavior.")
 
 class PlannerOutput(BaseModel):
     is_deployable: bool = Field(description="Whether this repo can be deployed as a web service. False for mobile apps, doc-only repos, CLI tools, etc.")
@@ -348,7 +349,14 @@ def _detect_workspace_sub_packages(scan: Dict[str, Any], package_path: str) -> L
     package_norm = _normalize_ctx(package_path)
 
     # Strong monorepo signals: pnpm-lock.yaml, pnpm-workspace.yaml, or lerna.json at root
-    workspace_signals = {"pnpm-lock.yaml", "pnpm-workspace.yaml", "lerna.json"}
+    workspace_signals = {
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "lerna.json",
+        "turbo.json",
+        "nx.json",
+        "yarn.lock",
+    }
     has_workspace_file = False
     for file_path in key_files:
         norm = _normalize_ctx(str(file_path))
@@ -369,7 +377,7 @@ def _detect_workspace_sub_packages(scan: Dict[str, Any], package_path: str) -> L
     if not has_workspace_file:
         root_pkg_key = "package.json" if package_norm == "." else f"{package_norm}/package.json"
         root_pkg_content = key_files.get(root_pkg_key, "")
-        if '"workspaces"' not in root_pkg_content:
+        if '"workspaces"' not in root_pkg_content and '"packageManager"' not in root_pkg_content:
             return []
 
     # Collect all subdirectories that have their own package.json
@@ -419,6 +427,23 @@ def _elevate_services_for_monorepo(
                 svc.build_context = "."
             elevated.append(svc)
     return elevated
+
+
+def _ensure_service_execution_contract(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        item = dict(svc)
+        build_ctx = _normalize_ctx(str(item.get("build_context", ".") or "."))
+        dockerfile_path = str(item.get("dockerfile_path", "") or "").strip()
+        if not dockerfile_path:
+            dockerfile_path = "Dockerfile" if build_ctx == "." else f"{build_ctx}/Dockerfile"
+        item["build_context"] = build_ctx
+        item["dockerfile_path"] = dockerfile_path
+        item["execution_root"] = "."
+        normalized.append(item)
+    return normalized
 
 
 def _apply_deterministic_fallback(
@@ -476,7 +501,7 @@ def _apply_deterministic_fallback(
     )
     services_list = [svc.model_dump()]
     services_list = _elevate_services_for_monorepo(services_list, scan, package_path)
-    state["services"] = services_list
+    state["services"] = _ensure_service_execution_contract(services_list)
     
     state["has_existing_dockerfiles"] = _scan_has_existing_dockerfiles(scan)
     state["has_existing_compose"] = _scan_has_existing_compose(scan)
@@ -691,6 +716,7 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         # services to the root building context, but explicitly define their nested dockerfile path.
         final_services = [s.model_dump() for s in filtered_services]
         final_services = _elevate_services_for_monorepo(final_services, scan, package_path)
+        final_services = _ensure_service_execution_contract(final_services)
 
         state["stack_tokens"] = combined_stack_tokens
         state["detected_stack"] = render_stack_summary(combined_stack_tokens)

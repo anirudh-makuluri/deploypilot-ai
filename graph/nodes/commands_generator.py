@@ -91,8 +91,9 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not name:
             continue
 
-        build_ctx = str(service.get("build_context", ".") or ".")
+        build_ctx = _normalize_ctx(str(service.get("build_context", ".") or "."))
         dockerfile_path = str(service.get("dockerfile_path", "") or "").strip()
+        execution_root = _normalize_ctx(str(service.get("execution_root", ".") or "."))
         
         logical_ctx = build_ctx
         if build_ctx == "." and dockerfile_path and "/" in dockerfile_path:
@@ -116,10 +117,13 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             port = None
 
+        dockerfile_for_cmd = dockerfile_path or ("Dockerfile" if normalized_ctx == "." else f"{normalized_ctx}/Dockerfile")
         by_service[name] = {
             "install": _install_command(service_tokens, scripts),
             "build": _build_command(service_tokens, scripts),
             "run": _run_command(service_tokens, scripts, port),
+            "docker_build": f"docker build -f {dockerfile_for_cmd} {build_ctx}",
+            "execution_root": execution_root,
         }
 
     global_commands = []
@@ -141,8 +145,9 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 svc_port = int(single.get("port"))
             except (TypeError, ValueError):
                 svc_port = 8000
+            build_ctx = _normalize_ctx(str(single.get("build_context", ".") or "."))
             global_commands.extend([
-                f"docker build -t {svc_name}:latest{df_flag} .",
+                f"docker build -t {svc_name}:latest{df_flag} {build_ctx}",
                 f"docker run --rm -p {svc_port}:{svc_port} {svc_name}:latest",
             ])
 

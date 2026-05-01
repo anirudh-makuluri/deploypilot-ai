@@ -189,6 +189,28 @@ def test_analyze_returns_400_on_graph_error(monkeypatch):
     assert response.json()["detail"] == "scan failed"
 
 
+def test_analyze_returns_400_on_preflight_error(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+    monkeypatch.setattr(
+        app_module.graph,
+        "invoke",
+        lambda *_args, **_kwargs: {
+            "error": {
+                "code": "preflight_failed",
+                "message": "Static preflight checks failed for generated Dockerfiles.",
+                "issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+            }
+        },
+    )
+
+    response = _client().post("/analyze", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "preflight_failed"
+
+
 def test_health_endpoint_reports_basic_configuration(monkeypatch):
     monkeypatch.setenv("SD_API_BEARER_TOKEN", "test-token")
     monkeypatch.setattr(db_module, "supabase", FakeSupabase())
@@ -524,6 +546,37 @@ def test_analyze_stream_emits_error_event_from_node(monkeypatch):
     assert events[0][0] == "progress"
     assert events[1][0] == "error"
     assert events[1][1]["detail"] == "scanner failed"
+
+
+def test_analyze_stream_emits_preflight_error_event(monkeypatch):
+    _set_auth(monkeypatch)
+    _set_common_mocks(monkeypatch)
+
+    async def fake_astream(_initial_state, config=None):
+        callbacks = config.get("callbacks", []) if config else []
+        assert len(callbacks) == 1
+        yield {"scanner": {"commit_sha": "sha-stream"}}
+        yield {
+            "preflight": {
+                "preflight_issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+                "error": {
+                    "code": "preflight_failed",
+                    "message": "Static preflight checks failed for generated Dockerfiles.",
+                    "issues": ["web: COPY source '../package.json' escapes build context 'apps/web'"],
+                },
+            }
+        }
+
+    monkeypatch.setattr(app_module.graph, "astream", fake_astream)
+
+    response = _client().post("/analyze/stream", json={"repo_url": "https://github.com/acme/repo"}, headers=_auth_headers())
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert events[0][0] == "progress"
+    assert events[1][0] == "progress"
+    assert events[2][0] == "error"
+    assert events[2][1]["detail"]["code"] == "preflight_failed"
 
 
 def test_analyze_stream_emits_cached_complete_and_backfills_fields(monkeypatch):

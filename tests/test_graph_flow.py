@@ -1,4 +1,9 @@
-from graph.graph import check_compose_required, check_planner_error, check_scanner_error
+from graph.graph import (
+    check_build_verify_required,
+    check_compose_required,
+    check_planner_error,
+    check_scanner_error,
+)
 
 
 def test_check_scanner_error_routes_on_error():
@@ -53,3 +58,13 @@ def test_check_compose_required_skips_for_scoped_monorepo():
 
 def test_check_compose_required_skips_when_services_missing():
     assert check_compose_required({}) == "skip"
+
+
+def test_check_build_verify_required_skips_by_default(monkeypatch):
+    monkeypatch.delenv("SD_RAILPACK_VERIFY_ENABLED", raising=False)
+    assert check_build_verify_required({}) == "skip"
+
+
+def test_check_build_verify_required_enabled(monkeypatch):
+    monkeypatch.setenv("SD_RAILPACK_VERIFY_ENABLED", "true")
+    assert check_build_verify_required({}) == "verify"

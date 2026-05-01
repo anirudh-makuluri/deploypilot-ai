@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
-from graph.graph import graph
+from graph.graph import graph, is_build_verify_enabled
 from graph.nodes.llm_config import TokenTracker
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -58,6 +58,7 @@ class AnalyzeResponse(BaseModel):
     confidence: float
     hadolint_results: Dict[str, str] = {}
     commands: Dict = Field(default_factory=dict)
+    build_verification: Dict = Field(default_factory=dict)
     token_usage: TokenUsage = TokenUsage()
 
 
@@ -289,6 +290,7 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
         confidence=result.get("confidence", 0.0),
         hadolint_results=result.get("hadolint_results", {}),
         commands=result.get("commands", {}),
+        build_verification=result.get("build_verification", {}),
         token_usage=TokenUsage(**tracker.get_usage())
     )
     
@@ -407,7 +409,9 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
         import random
         # Cache hits should still look like a full run to clients.
         yield f"event: progress\ndata: {json.dumps({'node': 'scanner', 'status': 'completed'})}\n\n"
-        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "verifier"]
+        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "preflight", "verifier"]
+        if is_build_verify_enabled():
+            remaining_nodes.insert(-2, "build_verify")
         if not cached_payload.get("docker_compose"):
             remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
         total_delay_s = random.uniform(4.0, 10.0)
@@ -458,7 +462,9 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
 
                         # Simulate the usual node progression so clients can't infer cache hits.
                         # Total delay is randomized to look like a real run.
-                        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "verifier"]
+                        remaining_nodes = ["planner", "commands_gen", "docker_gen", "compose_gen", "nginx_gen", "preflight", "verifier"]
+                        if is_build_verify_enabled():
+                            remaining_nodes.insert(-2, "build_verify")
                         if not cached.get("docker_compose"):
                             remaining_nodes = [n for n in remaining_nodes if n != "compose_gen"]
                         total_delay_s = random.uniform(4.0, 10.0)
@@ -485,6 +491,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                 confidence=full_state.get("confidence", 0.0),
                 hadolint_results=full_state.get("hadolint_results", {}),
                 commands=full_state.get("commands", {}),
+                build_verification=full_state.get("build_verification", {}),
                 token_usage=TokenUsage(**tracker.get_usage())
             )
             
@@ -572,6 +579,7 @@ async def improve_with_feedback(req: FeedbackRequest):
         confidence=improved["confidence"],
         hadolint_results=improved["hadolint_results"],
         commands=improved.get("commands", {}),
+        build_verification=improved.get("build_verification", {}),
         token_usage=TokenUsage(**tracker.get_usage()),
     )
 
@@ -642,6 +650,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                 confidence=improved["confidence"],
                 hadolint_results=improved["hadolint_results"],
                 commands=improved.get("commands", {}),
+                build_verification=improved.get("build_verification", {}),
                 token_usage=TokenUsage(**tracker.get_usage()),
             )
 
