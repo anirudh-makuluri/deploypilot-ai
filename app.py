@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 import json
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
+from uuid import uuid4
 from graph.graph import graph, is_build_verify_enabled
 from graph.nodes.llm_config import TokenTracker
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +46,7 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
 
 class AnalyzeResponse(BaseModel):
+    response_id: Optional[str] = None
     commit_sha: str = "unknown"
     stack_summary: str
     stack_tokens: List[str] = Field(default_factory=list)
@@ -59,6 +61,7 @@ class AnalyzeResponse(BaseModel):
     hadolint_results: Dict[str, str] = {}
     commands: Dict = Field(default_factory=dict)
     build_verification: Dict = Field(default_factory=dict)
+    llm_outputs: Dict = Field(default_factory=dict)
     token_usage: TokenUsage = TokenUsage()
 
 
@@ -111,6 +114,17 @@ class FeedbackRequest(BaseModel):
     github_token: Optional[str] = None
 
 
+class ResponseStatusRequest(BaseModel):
+    response_id: str
+    passed: bool
+
+
+class ResponseStatusResponse(BaseModel):
+    response_id: str
+    passed: bool
+    cache_deleted: int = 0
+
+
 class TemplateRequest(BaseModel):
     name: str
     description: str = ""
@@ -134,6 +148,43 @@ class HealthResponse(BaseModel):
     supabase_configured: bool
 
 
+def _store_response_log(
+    supabase,
+    *,
+    response_id: str,
+    endpoint: str,
+    repo_url: str,
+    commit_sha: Optional[str],
+    package_path: str,
+    service_name: Optional[str],
+    from_cache: bool,
+    payload: Dict,
+) -> None:
+    if not supabase:
+        return
+    for attempt in range(3):
+        try:
+            supabase.table("analysis_responses").insert(
+                {
+                    "id": response_id,
+                    "endpoint": endpoint,
+                    "repo_url": repo_url,
+                    "commit_sha": commit_sha,
+                    "package_path": package_path or ".",
+                    "service_name": service_name,
+                    "from_cache": from_cache,
+                    "payload": payload,
+                }
+            ).execute()
+            break
+        except Exception as e:
+            print(f"Failed to store analysis response log (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:
+                import time
+
+                time.sleep(1)
+
+
 def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: str = "."):
     from db import supabase
 
@@ -143,7 +194,7 @@ def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: 
     try:
         existing = (
             supabase.table("analysis_cache")
-            .select("result")
+            .select("result,response_id")
             .eq("repo_url", repo_url)
             .eq("commit_sha", commit_sha)
             .eq("package_path", package_path)
@@ -157,6 +208,9 @@ def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: 
     cached_result = existing.data.get("result") if existing.data else None
     if not cached_result:
         raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
+    response_id = existing.data.get("response_id") if existing.data else None
+    if response_id and isinstance(cached_result, dict):
+        cached_result.setdefault("response_id", response_id)
 
     return supabase, cached_result
 
@@ -175,7 +229,7 @@ def _fetch_cached_analysis_or_404_service_aware(
     try:
         query = (
             supabase.table("analysis_cache")
-            .select("result")
+            .select("result,response_id")
             .eq("repo_url", repo_url)
             .eq("commit_sha", commit_sha)
             .eq("package_path", package_path)
@@ -192,6 +246,9 @@ def _fetch_cached_analysis_or_404_service_aware(
     cached_result = existing.data.get("result") if existing.data else None
     if not cached_result:
         raise HTTPException(status_code=404, detail=f"No cached analysis found for {repo_url}@{commit_sha}")
+    response_id = existing.data.get("response_id") if existing.data else None
+    if response_id and isinstance(cached_result, dict):
+        cached_result.setdefault("response_id", response_id)
 
     return supabase, cached_result
 
@@ -235,6 +292,7 @@ async def health_check_authenticated():
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
+    from db import supabase
     _require_auth(authorization)
     if req.commit_sha:
         try:
@@ -247,6 +305,17 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
             cached_payload = dict(cached_result)
             cached_payload.setdefault("commit_sha", req.commit_sha)
             cached_payload.pop("_cache_package_path", None)
+            _store_response_log(
+                supabase,
+                response_id=cached_payload.get("response_id") or str(uuid4()),
+                endpoint="/analyze",
+                repo_url=req.repo_url,
+                commit_sha=req.commit_sha,
+                package_path=req.package_path,
+                service_name=req.service_name,
+                from_cache=True,
+                payload=cached_payload,
+            )
             return AnalyzeResponse(**cached_payload)
         except HTTPException as e:
             if e.status_code != 404:
@@ -275,8 +344,10 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
         return AnalyzeResponse(**cached_payload)
     
     commit_sha = result.get("commit_sha", "unknown")
+    response_id = str(uuid4())
 
     response = AnalyzeResponse(
+        response_id=response_id,
         commit_sha=commit_sha,
         stack_summary=result.get("detected_stack", "Unknown"),
         stack_tokens=result.get("stack_tokens", []),
@@ -291,11 +362,11 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
         hadolint_results=result.get("hadolint_results", {}),
         commands=result.get("commands", {}),
         build_verification=result.get("build_verification", {}),
+        llm_outputs=result.get("llm_outputs", {}),
         token_usage=TokenUsage(**tracker.get_usage())
     )
     
     # Save to Supabase cache
-    from db import supabase
     if supabase and commit_sha != "unknown":
         for attempt in range(3):
             try:
@@ -303,6 +374,7 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 # Internal cache metadata used to support package-scoped cache reuse.
                 result_dict["_cache_package_path"] = req.package_path
                 supabase.table("analysis_cache").insert({
+                    "response_id": response_id,
                     "repo_url": req.repo_url,
                     "commit_sha": commit_sha,
                     "package_path": req.package_path,
@@ -315,6 +387,18 @@ async def analyze_repo(req: AnalyzeRequest, authorization: Optional[str] = Heade
                 if attempt < 2:
                     import time
                     time.sleep(1)
+    response_payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+    _store_response_log(
+        supabase,
+        response_id=response_id,
+        endpoint="/analyze",
+        repo_url=req.repo_url,
+        commit_sha=commit_sha,
+        package_path=req.package_path,
+        service_name=req.service_name,
+        from_cache=False,
+        payload=response_payload,
+    )
 
     return response
 
@@ -404,6 +488,7 @@ async def delete_cached_analysis(req: DeleteCacheRequest):
 
 @app.post("/analyze/stream")
 async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] = Header(default=None)):
+    from db import supabase
     async def cached_event_generator(cached_payload: Dict):
         import asyncio
         import random
@@ -420,6 +505,17 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
             await asyncio.sleep(step_delay_s)
             yield f"event: progress\ndata: {json.dumps({'node': node, 'status': 'completed'})}\n\n"
 
+        _store_response_log(
+            supabase,
+            response_id=cached_payload.get("response_id") or str(uuid4()),
+            endpoint="/analyze/stream",
+            repo_url=req.repo_url,
+            commit_sha=cached_payload.get("commit_sha"),
+            package_path=req.package_path,
+            service_name=req.service_name,
+            from_cache=True,
+            payload=cached_payload,
+        )
         yield f"event: complete\ndata: {json.dumps(cached_payload)}\n\n"
 
     async def live_event_generator():
@@ -478,6 +574,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         return
             
             response = AnalyzeResponse(
+                response_id=str(uuid4()),
                 commit_sha=full_state.get("commit_sha", "unknown"),
                 stack_summary=full_state.get("detected_stack", "Unknown"),
                 stack_tokens=full_state.get("stack_tokens", []),
@@ -492,11 +589,11 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                 hadolint_results=full_state.get("hadolint_results", {}),
                 commands=full_state.get("commands", {}),
                 build_verification=full_state.get("build_verification", {}),
+                llm_outputs=full_state.get("llm_outputs", {}),
                 token_usage=TokenUsage(**tracker.get_usage())
             )
             
             # Save to Supabase cache
-            from db import supabase
             commit_sha = full_state.get("commit_sha", "unknown")
             if supabase and commit_sha != "unknown":
                 for attempt in range(3):
@@ -505,6 +602,7 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                         # Internal cache metadata used to support package-scoped cache reuse.
                         result_dict["_cache_package_path"] = req.package_path
                         supabase.table("analysis_cache").insert({
+                            "response_id": response.response_id,
                             "repo_url": req.repo_url,
                             "commit_sha": commit_sha,
                             "package_path": req.package_path,
@@ -519,6 +617,17 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
                             time.sleep(1)
             
             final_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+            _store_response_log(
+                supabase,
+                response_id=final_dict.get("response_id") or str(uuid4()),
+                endpoint="/analyze/stream",
+                repo_url=req.repo_url,
+                commit_sha=full_state.get("commit_sha"),
+                package_path=req.package_path,
+                service_name=req.service_name,
+                from_cache=False,
+                payload=final_dict,
+            )
             yield f"event: complete\ndata: {json.dumps(final_dict)}\n\n"
             
         except Exception as e:
@@ -566,6 +675,7 @@ async def improve_with_feedback(req: FeedbackRequest):
 
     # 3. Build the response
     response = AnalyzeResponse(
+        response_id=str(uuid4()),
         commit_sha=req.commit_sha,
         stack_summary=improved["stack_summary"],
         stack_tokens=improved.get("stack_tokens", []),
@@ -580,6 +690,7 @@ async def improve_with_feedback(req: FeedbackRequest):
         hadolint_results=improved["hadolint_results"],
         commands=improved.get("commands", {}),
         build_verification=improved.get("build_verification", {}),
+        llm_outputs=improved.get("llm_outputs", {}),
         token_usage=TokenUsage(**tracker.get_usage()),
     )
 
@@ -589,6 +700,7 @@ async def improve_with_feedback(req: FeedbackRequest):
     try:
         supabase.table("analysis_cache").upsert(
             {
+                "response_id": response.response_id,
                 "repo_url": req.repo_url,
                 "commit_sha": req.commit_sha,
                 "package_path": cached_result.get("_cache_package_path", "."),
@@ -600,6 +712,17 @@ async def improve_with_feedback(req: FeedbackRequest):
         print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
     except Exception as e:
         print(f"Failed to update cache after feedback improvement: {e}")
+    _store_response_log(
+        supabase,
+        response_id=response.response_id or str(uuid4()),
+        endpoint="/feedback",
+        repo_url=req.repo_url,
+        commit_sha=req.commit_sha,
+        package_path=req.package_path,
+        service_name=None,
+        from_cache=False,
+        payload=result_dict,
+    )
 
     return response
 
@@ -637,6 +760,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
             improved = format_feedback_result(full_state)
 
             response = AnalyzeResponse(
+                response_id=str(uuid4()),
                 commit_sha=req.commit_sha,
                 stack_summary=improved["stack_summary"],
                 stack_tokens=improved.get("stack_tokens", []),
@@ -651,6 +775,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                 hadolint_results=improved["hadolint_results"],
                 commands=improved.get("commands", {}),
                 build_verification=improved.get("build_verification", {}),
+                llm_outputs=improved.get("llm_outputs", {}),
                 token_usage=TokenUsage(**tracker.get_usage()),
             )
 
@@ -659,6 +784,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
             try:
                 supabase.table("analysis_cache").upsert(
                     {
+                        "response_id": response.response_id,
                         "repo_url": req.repo_url,
                         "commit_sha": req.commit_sha,
                         "package_path": cached_result.get("_cache_package_path", "."),
@@ -672,12 +798,69 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                 print(f"Failed to update cache after feedback improvement: {e}")
 
             final_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+            _store_response_log(
+                supabase,
+                response_id=response.response_id or str(uuid4()),
+                endpoint="/feedback/stream",
+                repo_url=req.repo_url,
+                commit_sha=req.commit_sha,
+                package_path=req.package_path,
+                service_name=None,
+                from_cache=False,
+                payload=final_dict,
+            )
             yield f"event: complete\ndata: {json.dumps(final_dict)}\n\n"
 
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/responses/status", response_model=ResponseStatusResponse, dependencies=[Depends(require_auth)])
+async def set_response_status(req: ResponseStatusRequest):
+    from db import supabase
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    try:
+        response_row = (
+            supabase.table("analysis_responses")
+            .select("id,repo_url,commit_sha,package_path,service_name")
+            .eq("id", req.response_id)
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Response id not found: {req.response_id}")
+
+    row = response_row.data or {}
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Response id not found: {req.response_id}")
+
+    try:
+        supabase.table("analysis_responses").update({"passed": req.passed}).eq("id", req.response_id).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update response status: {e}")
+
+    deleted = 0
+    if req.passed is False:
+        delete_query = (
+            supabase.table("analysis_cache")
+            .delete()
+            .eq("repo_url", row.get("repo_url"))
+            .eq("commit_sha", row.get("commit_sha"))
+            .eq("package_path", row.get("package_path"))
+        )
+        if row.get("service_name"):
+            delete_query = delete_query.eq("service_name", row.get("service_name"))
+        else:
+            delete_query = delete_query.is_("service_name", None)
+        deleted_rows = delete_query.execute()
+        deleted = len(deleted_rows.data or [])
+
+    return ResponseStatusResponse(response_id=req.response_id, passed=req.passed, cache_deleted=deleted)
 
 @app.get("/templates", dependencies=[Depends(require_auth)])
 async def get_templates(active_only: bool = True):

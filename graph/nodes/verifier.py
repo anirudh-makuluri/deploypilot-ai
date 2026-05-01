@@ -366,9 +366,24 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
         state["hadolint_results"] = hadolint_results
         state["verifier_retry_attempts"] = attempts_used
         state["verifier_fallback_used"] = fallback_used
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["verifier"] = {
+            "llm_confidence_raw": result.confidence,
+            "llm_risks_raw": result.risks,
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+        }
+        state["llm_outputs"] = llm_outputs
     except Exception as e:
         state["confidence"] = 0.5
         state["risks"] = [f"Verifier failed to run: {e}"]
         state["hadolint_results"] = hadolint_results
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["verifier"] = {"error": str(e)}
+        state["llm_outputs"] = llm_outputs
     
     return state

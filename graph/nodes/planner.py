@@ -617,7 +617,11 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 """
 
     def _invoke(raw_prompt: str):
-        return llm_planner.invoke(raw_prompt, config=config)
+        try:
+            return llm_planner.invoke(raw_prompt, config=config)
+        except TypeError:
+            # Test doubles or alternate clients may not accept `config`.
+            return llm_planner.invoke(raw_prompt)
 
     def _validate(response):
         content = response.content.strip()
@@ -647,6 +651,15 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
             config=RETRY_CONFIGS["planner"],
             node_name="planner",
         )
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["planner"] = {
+            "output": data.model_dump(),
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+        }
+        state["llm_outputs"] = llm_outputs
         
         if not data.is_deployable:
             state["error"] = data.error_reason or "This repository is not deployable as a web service"
@@ -738,6 +751,11 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
 
         error_details = str(e)
         state["error"] = f"Failed to analyze repository: {error_details}"
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["planner"] = {"error": error_details}
+        state["llm_outputs"] = llm_outputs
         
         
     return state

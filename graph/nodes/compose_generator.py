@@ -633,10 +633,27 @@ Improve the baseline compose file using these rules:
         state["docker_compose"] = compose
         state["compose_retry_attempts"] = attempts_used
         state["compose_fallback_used"] = fallback_used
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["compose"] = {
+            "raw_output": response.content,
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+        }
+        state["llm_outputs"] = llm_outputs
     except Exception as e:
         state["docker_compose"] = baseline_compose
         state["compose_retry_attempts"] = RETRY_CONFIGS["compose"].max_attempts
         state["compose_fallback_used"] = True
         state["compose_generation_warning"] = f"llm_refine_failed:{e}"
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["compose"] = {
+            "error": str(e),
+            "fallback_used": True,
+        }
+        state["llm_outputs"] = llm_outputs
     
     return state

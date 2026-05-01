@@ -85,13 +85,7 @@ API_BEARER_TOKEN=your_api_token
 PORT=8080
 ```
 
-4. Initialize the Supabase schema.
-
-- Run [`supabase_schema.sql`](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/supabase_schema.sql) in the Supabase SQL editor.
-- Run [`migrations/create_dockerfile_templates.sql`](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/migrations/create_dockerfile_templates.sql) as well if you want to use the template endpoints.
-- `supabase_schema.sql` creates the analysis cache, example bank, and benchmark artifact tables. The template migration creates the `dockerfile_templates` table used by `GET /templates` and the template management endpoints.
-
-5. Start the API.
+4. Start the API.
 
 ```bash
 python app.py
@@ -179,6 +173,10 @@ Cache operations:
 
 - `DELETE /cache`
 
+Response outcome operations:
+
+- `POST /responses/status` (updates pass/fail status for a `response_id`; when `passed=false`, matching cache entry is deleted)
+
 Template operations:
 
 - `GET /templates`
@@ -190,6 +188,7 @@ Template operations:
 
 The primary analysis endpoints return:
 
+- `response_id`
 - `commit_sha`
 - `stack_summary`
 - `stack_tokens`
@@ -203,6 +202,8 @@ The primary analysis endpoints return:
 - `confidence`
 - `hadolint_results`
 - `commands`
+- `build_verification`
+- `llm_outputs`
 - `token_usage`
 
 Streaming endpoints emit `progress`, `complete`, and `error` events as SSE.

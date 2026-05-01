@@ -369,10 +369,27 @@ Improve the baseline config using these rules:
         state["nginx_conf"] = nginx_conf
         state["nginx_retry_attempts"] = attempts_used
         state["nginx_fallback_used"] = fallback_used
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["nginx"] = {
+            "raw_output": response.content,
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+        }
+        state["llm_outputs"] = llm_outputs
     except Exception as e:
         state["nginx_conf"] = baseline_nginx
         state["nginx_retry_attempts"] = RETRY_CONFIGS["nginx"].max_attempts
         state["nginx_fallback_used"] = True
         state["nginx_generation_warning"] = f"llm_refine_failed:{e}"
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["nginx"] = {
+            "error": str(e),
+            "fallback_used": True,
+        }
+        state["llm_outputs"] = llm_outputs
     
     return state

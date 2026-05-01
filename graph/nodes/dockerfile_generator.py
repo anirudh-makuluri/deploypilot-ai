@@ -1,11 +1,147 @@
 from typing import Dict, Any
 import json
 import re
+from pydantic import BaseModel, Field
 from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_docker, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
 from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 from tools.template_store import match_template, fill_template
+
+
+class DockerfilePlan(BaseModel):
+    runtime: str = Field(description="node or python")
+    base_image: str = Field(description="Base image for build/runtime")
+    workdir: str = Field(default="/app")
+    install_cmd: str = Field(default="")
+    build_cmd: str = Field(default="")
+    run_cmd: str = Field(default="")
+    package_manager: str = Field(default="")
+    expose_port: int = Field(default=8000)
+    use_non_root_user: bool = Field(default=True)
+
+
+def _build_plan_defaults(
+    service: dict[str, Any],
+    stack_tokens: list[str],
+    available_scripts: list[str],
+    command_hints: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    tokens = {str(token).lower() for token in stack_tokens if isinstance(token, str)}
+    scripts = {str(script).strip().lower() for script in available_scripts}
+    hints = command_hints or {}
+    port = int(service.get("port", 8000) or 8000)
+
+    if "python" in tokens:
+        return {
+            "runtime": "python",
+            "base_image": "python:3.11-slim",
+            "workdir": "/app",
+            "install_cmd": str(hints.get("install") or "pip install --no-cache-dir -r requirements.txt"),
+            "build_cmd": "",
+            "run_cmd": str(hints.get("run") or f"python -m uvicorn main:app --host 0.0.0.0 --port {port}"),
+            "package_manager": "pip",
+            "expose_port": port,
+            "use_non_root_user": True,
+        }
+
+    if "pnpm" in tokens:
+        install_cmd = str(hints.get("install") or "corepack enable pnpm && pnpm i --frozen-lockfile")
+        package_manager = "pnpm"
+    elif "yarn" in tokens:
+        install_cmd = str(hints.get("install") or "yarn install --frozen-lockfile")
+        package_manager = "yarn"
+    else:
+        install_cmd = str(hints.get("install") or "npm ci")
+        package_manager = "npm"
+
+    if hints.get("build"):
+        build_cmd = str(hints.get("build"))
+    elif "build" in scripts:
+        build_cmd = f"{package_manager} {'run ' if package_manager == 'npm' else ''}build".strip()
+    else:
+        build_cmd = ""
+
+    if hints.get("run"):
+        run_cmd = str(hints.get("run"))
+    elif "start" in scripts:
+        run_cmd = "npm start" if package_manager == "npm" else f"{package_manager} start"
+    elif "dev" in scripts:
+        run_cmd = "npm run dev" if package_manager == "npm" else f"{package_manager} dev"
+    else:
+        run_cmd = "npm start"
+
+    return {
+        "runtime": "node",
+        "base_image": "node:20-alpine",
+        "workdir": "/app",
+        "install_cmd": install_cmd,
+        "build_cmd": build_cmd,
+        "run_cmd": run_cmd,
+        "package_manager": package_manager,
+        "expose_port": port,
+        "use_non_root_user": True,
+    }
+
+
+def _merge_plan(defaults: dict[str, Any], llm_plan: dict[str, Any]) -> DockerfilePlan:
+    merged = dict(defaults)
+    for key, value in (llm_plan or {}).items():
+        if value in (None, ""):
+            continue
+        merged[key] = value
+    return DockerfilePlan(**merged)
+
+
+def _render_dockerfile_from_plan(plan: DockerfilePlan, service: dict[str, Any]) -> str:
+    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
+    if plan.runtime.lower() == "python":
+        run_parts = [part for part in str(plan.run_cmd).split(" ") if part]
+        cmd_json = "[" + ", ".join(f'"{part}"' for part in run_parts) + "]" if run_parts else '["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]'
+        non_root = "RUN useradd -m appuser\nUSER appuser\n" if plan.use_non_root_user else ""
+        return (
+            f"FROM {plan.base_image}\n\n"
+            f"WORKDIR {plan.workdir}\n"
+            "ENV PYTHONDONTWRITEBYTECODE=1\n"
+            "ENV PYTHONUNBUFFERED=1\n\n"
+            "COPY requirements*.txt ./\n"
+            f"RUN {plan.install_cmd}\n\n"
+            "COPY . .\n"
+            f"EXPOSE {int(plan.expose_port)}\n"
+            f"{non_root}"
+            f"CMD {cmd_json}\n"
+        )
+
+    deps_copy_commands = (
+        "COPY package*.json ./\n"
+        "COPY pnpm-lock.yaml* ./\n"
+        "COPY pnpm-workspace.yaml* ./\n"
+        "COPY yarn.lock* ./\n"
+    )
+    if build_ctx_norm != ".":
+        deps_copy_commands += f"COPY {build_ctx_norm}/package.json ./{build_ctx_norm}/package.json\n"
+
+    run_parts = [part for part in str(plan.run_cmd).split(" ") if part]
+    run_cmd = "CMD [" + ", ".join(f'"{part}"' for part in run_parts) + "]" if run_parts else 'CMD ["npm", "start"]'
+    maybe_build = f"RUN {plan.build_cmd}\n" if str(plan.build_cmd).strip() else ""
+    user_bits = "RUN addgroup -S app && adduser -S app -G app\n" if plan.use_non_root_user else ""
+    final_user = "USER app\n" if plan.use_non_root_user else ""
+    return (
+        f"FROM {plan.base_image} AS base\n"
+        f"WORKDIR {plan.workdir}\n"
+        f"{user_bits}\n"
+        "FROM base AS deps\n"
+        f"{deps_copy_commands}"
+        f"RUN {plan.install_cmd}\n\n"
+        "FROM deps AS build\n"
+        "COPY . .\n"
+        f"{maybe_build}"
+        "FROM base AS runner\n"
+        f"COPY --from=build {plan.workdir} {plan.workdir}\n"
+        f"{final_user}"
+        f"EXPOSE {int(plan.expose_port)}\n"
+        f"{run_cmd}\n"
+    )
 
 
 def _extract_package_scripts(key_files: dict[str, Any], build_ctx: str) -> list[str]:
@@ -423,6 +559,12 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
     
     dockerfiles = {}
     warnings = state.get("docker_generation_warnings", [])
+    llm_outputs = state.get("llm_outputs", {})
+    if not isinstance(llm_outputs, dict):
+        llm_outputs = {}
+    docker_llm_outputs = llm_outputs.get("dockerfile_plan", {})
+    if not isinstance(docker_llm_outputs, dict):
+        docker_llm_outputs = {}
     if not isinstance(warnings, list):
         warnings = []
     
@@ -541,75 +683,92 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
             available_scripts=available_scripts,
         )
 
-        # ─── Use the baseline directly as the final Dockerfile ─────────────
-        # The LLM is only asked to verify, not to rewrite.
-        dockerfiles[dockerfile_key] = baseline_dockerfile
+        # ─── LLM Plan -> Deterministic Render ───────────────────────────────
+        plan_defaults = _build_plan_defaults(
+            service=service,
+            stack_tokens=stack_tokens,
+            available_scripts=available_scripts,
+            command_hints=command_hints,
+        )
+        template_name = matched.get("name", "none") if matched else "none"
+        template_content = matched.get("template_content", "") if matched else ""
 
-        # ─── LLM Verification (advisory only, does not replace content) ───
-        verify_prompt = f"""
-You are a DevOps expert reviewing a Dockerfile for production deployment.
-Do NOT output a new Dockerfile. Only check for issues.
+        plan_prompt = f"""
+You are generating a Dockerfile PLAN, not Dockerfile text.
+Return ONLY JSON matching this exact schema:
+{{
+  "runtime": "node|python",
+  "base_image": "string",
+  "workdir": "string",
+  "install_cmd": "string",
+  "build_cmd": "string",
+  "run_cmd": "string",
+  "package_manager": "string",
+  "expose_port": integer,
+  "use_non_root_user": boolean
+}}
 
 Service: {svc_name}
 Build context: {build_ctx}
 Port: {port}
-Stack: {state.get('detected_stack', 'unknown')}
+Detected stack: {state.get('detected_stack', 'unknown')}
 {scripts_hint}
 {commands_hint}
-{'Template used: ' + matched.get('name', 'unknown') if template_used and matched else 'Generated deterministically'}
+Template matched: {template_name}
+Template content (reference only):
+{template_content}
 
-Dockerfile to verify:
-{baseline_dockerfile}
+Plan defaults (strong priors):
+{json.dumps(plan_defaults, indent=2)}
 
-{('EXISTING Dockerfile (from repository) for reference:' + chr(10) + existing_dockerfile) if existing_dockerfile else ''}
-
-Respond with ONLY a JSON object:
-- "verdict": "pass" if the Dockerfile looks correct, "fail" if there are critical issues
-- "issues": a list of strings describing each issue (empty list if verdict is "pass")
-
-Example: {{"verdict": "pass", "issues": []}}
-Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build step"]}}
+Rules:
+- Keep build context assumptions compatible with monorepos.
+- Prefer plan_defaults unless there is strong evidence to change a field.
+- Never output markdown.
 """
 
+        final_dockerfile = baseline_dockerfile
         try:
             response, _, _ = invoke_with_retry(
                 invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt, config=config),
-                prompt=verify_prompt,
+                prompt=plan_prompt,
                 fallback_prompt=FALLBACK_PROMPTS["docker"],
                 config=RETRY_CONFIGS["docker"],
-                node_name=f"docker_verify:{svc_name}",
+                node_name=f"docker_plan:{svc_name}",
             )
-            verify_text = strip_markdown_wrapper(response.content).strip()
-            try:
-                verdict = json.loads(verify_text)
-            except (json.JSONDecodeError, TypeError):
-                # Try to recover if the model wrapped JSON in extra text or formatting.
-                try:
-                    import re
-                    match = re.search(r"\{.*\}", verify_text, re.DOTALL)
-                    if match:
-                        verdict = json.loads(match.group(0))
-                    else:
-                        raise json.JSONDecodeError("no JSON object could be decoded", verify_text, 0)
-                except Exception:
-                    warnings.append(f"llm_verify_unparsed:{svc_name}")
-                    print(f"[docker_verify] {svc_name}: Could not parse LLM verification response")
-                    verdict = None
-
-            if isinstance(verdict, dict):
-                if verdict.get("verdict") == "fail":
-                    issues = verdict.get("issues", [])
-                    for issue in issues:
-                        warnings.append(f"llm_verify:{svc_name}:{issue}")
-                    print(f"[docker_verify] {svc_name}: FAIL — {issues}")
-                else:
-                    print(f"[docker_verify] {svc_name}: PASS")
+            plan_text = strip_markdown_wrapper(response.content).strip()
+            plan_data = json.loads(plan_text)
+            merged_plan = _merge_plan(plan_defaults, plan_data)
+            rendered = _render_dockerfile_from_plan(merged_plan, service=service)
+            final_dockerfile = _repair_dockerfile_output(
+                rendered,
+                service=service,
+                key_files=repair_key_files,
+                available_scripts=available_scripts,
+            )
+            docker_llm_outputs[svc_name] = {
+                "plan_defaults": plan_defaults,
+                "llm_plan": plan_data,
+                "merged_plan": merged_plan.model_dump(),
+                "template_name": template_name,
+                "from_fallback": False,
+            }
         except Exception as e:
-            warnings.append(f"llm_verify_failed:{svc_name}:{e}")
+            warnings.append(f"docker_plan_failed:{svc_name}:{e}")
+            docker_llm_outputs[svc_name] = {
+                "plan_defaults": plan_defaults,
+                "error": str(e),
+                "template_name": template_name,
+                "from_fallback": True,
+            }
         finally:
             service["build_context"] = original_ctx
+
+        dockerfiles[dockerfile_key] = final_dockerfile
     
     state["dockerfiles"] = dockerfiles
+    llm_outputs["dockerfile_plan"] = docker_llm_outputs
+    state["llm_outputs"] = llm_outputs
     if warnings:
         state["docker_generation_warnings"] = warnings
     return state
