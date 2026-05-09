@@ -15,7 +15,7 @@ from db import supabase
 DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
     {
         "name": "pnpm_monorepo_vite",
-        "description": "pnpm workspace monorepo Vite app",
+        "description": "pnpm workspace monorepo Vite app (production mode)",
         "match_stack_tokens": ["pnpm", "vite"],
         "match_signals": {"is_monorepo": True, "has_turbo": False},
         "priority": 18,
@@ -39,7 +39,7 @@ DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
             "COPY --from=builder /app /app\n"
             "USER app\n"
             "EXPOSE {{port}}\n"
-            'CMD ["pnpm", "start"]\n'
+            'CMD ["pnpm", "vite"]\n'
         ),
     },
     {

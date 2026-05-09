@@ -63,6 +63,9 @@ def _build_plan_defaults(
         run_cmd = str(hints.get("run"))
     elif "start" in scripts:
         run_cmd = "npm start" if package_manager == "npm" else f"{package_manager} start"
+    elif "vite" in scripts:
+        # Vite production mode (standard approach, used by Vercel)
+        run_cmd = "npm vite" if package_manager == "npm" else f"{package_manager} vite"
     elif "dev" in scripts:
         run_cmd = "npm run dev" if package_manager == "npm" else f"{package_manager} dev"
     else:
@@ -843,19 +846,36 @@ def _apply_vite_start_fallback(
     available_scripts: list[str],
     port: int,
 ) -> str:
-    """For Vite templates, use preview command when `start` script is absent."""
+    """For Vite templates, adjust start command based on available scripts.
+    
+    Priority:
+    1. Use 'start' if available
+    2. Use 'vite' if available (standard Vercel approach)
+    3. Use 'preview' as fallback
+    4. Keep template default if none found
+    """
     scripts = {str(s).strip().lower() for s in available_scripts}
     if "start" in scripts:
         return dockerfile_content
-    if "preview" not in scripts:
-        return dockerfile_content
+    
+    # Prefer 'vite' (production mode) over 'preview' (development preview)
+    if "vite" in scripts:
+        return re.sub(
+            r'(?im)^\s*CMD\s+\[[^\n]+\]\s*$',
+            f'CMD ["pnpm", "vite"]',
+            dockerfile_content,
+            count=1,
+        )
+    
+    if "preview" in scripts:
+        return re.sub(
+            r'(?im)^\s*CMD\s+\[[^\n]+\]\s*$',
+            f'CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "{int(port)}"]',
+            dockerfile_content,
+            count=1,
+        )
 
-    return re.sub(
-        r'(?im)^\s*CMD\s+\[[^\n]+\]\s*$',
-        f'CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "{int(port)}"]',
-        dockerfile_content,
-        count=1,
-    )
+    return dockerfile_content
 
 
 def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
