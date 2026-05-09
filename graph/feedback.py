@@ -17,6 +17,11 @@ from .nodes.llm_config import (
     FALLBACK_PROMPTS,
 )
 from .nodes.verifier import VerifierOutput, run_hadolint
+from .nodes.verifier import _filter_risks, _compute_deterministic_confidence
+from .nodes.dockerfile_generator import _repair_dockerfile_output
+from .nodes.compose_generator import _repair_compose_output
+from .nodes.nginx_generator import _repair_nginx_output, _infer_route_flags
+from .nodes.preflight import preflight_node
 
 
 def _get_dockerfile_path(build_context: str) -> str:
@@ -111,6 +116,9 @@ def feedback_coordinator_node(state: Dict[str, Any], config: RunnableConfig = No
     prior_risks = state.get("prior_risks", [])
     prior_hadolint = state.get("prior_hadolint_results", {})
     feedback = state.get("feedback", "")
+    deployment_failure_summary = state.get("deployment_failure_summary", "") or ""
+    deployment_failure_logs = state.get("deployment_failure_logs", "") or ""
+    failed_artifact_scope = state.get("failed_artifact_scope", "") or ""
     feedback_history = state.get("prior_feedbacks", [])
     
     # Simple regression heuristic: if the exact same feedback was already submitted twice,
@@ -146,6 +154,15 @@ PRIOR HADOLINT WARNINGS:
 PRIOR RISKS:
 {json.dumps(prior_risks, indent=2)}
 
+DEPLOYMENT FAILURE SUMMARY:
+{deployment_failure_summary}
+
+FAILED ARTIFACT SCOPE (if known):
+{failed_artifact_scope}
+
+DEPLOYMENT FAILURE LOGS:
+{deployment_failure_logs}
+
 CURRENT DOCKERFILES:
 {json.dumps(dockerfiles, indent=2)}
 
@@ -167,7 +184,10 @@ Keep instructions concise, actionable, and file-specific.
     try:
         def _invoke(raw_prompt: str):
             structured = llm_coordinator.with_structured_output(CoordinatorOutput)
-            return structured.invoke(raw_prompt, config=config)
+            try:
+                return structured.invoke(raw_prompt, config=config)
+            except TypeError:
+                return structured.invoke(raw_prompt)
 
         result, _, _ = invoke_with_retry(
             invoke_fn=_invoke,
@@ -190,10 +210,38 @@ def dockerfile_improver_node(state: Dict[str, Any], config: RunnableConfig = Non
     detected_stack = state.get("detected_stack", "unknown")
     feedback = state.get("feedback", "")
     plan = state.get("change_plan", [])
+    scan = state.get("repo_scan", {})
+    services = state.get("services", [])
     updated: Dict[str, str] = {}
+
+    service_by_dockerfile: Dict[str, Dict[str, Any]] = {}
+    service_by_name: Dict[str, Dict[str, Any]] = {}
+    if isinstance(services, list):
+        for svc in services:
+            if not isinstance(svc, dict):
+                continue
+            name = str(svc.get("name", "")).strip()
+            if name:
+                service_by_name[name] = svc
+            df_path = str(svc.get("dockerfile_path") or _get_dockerfile_path(str(svc.get("build_context", "."))))
+            service_by_dockerfile.setdefault(df_path, svc)
 
     for svc_name, current_dockerfile in dockerfiles.items():
         instruction = _get_instruction(plan, artifact_type="dockerfile", service_name=svc_name)
+        if not instruction.should_change:
+            mapped_service = service_by_dockerfile.get(svc_name)
+            mapped_name = str(mapped_service.get("name", "")).strip() if isinstance(mapped_service, dict) else ""
+            if not mapped_name and svc_name in service_by_name:
+                mapped_name = svc_name
+            if not mapped_name and "dockerfile" in svc_name.lower():
+                remaining = [
+                    n for n in service_by_name.keys()
+                    if n not in dockerfiles
+                ]
+                if len(remaining) == 1:
+                    mapped_name = remaining[0]
+            if mapped_name:
+                instruction = _get_instruction(plan, artifact_type="dockerfile", service_name=mapped_name)
         if not instruction.should_change:
             updated[svc_name] = current_dockerfile
             continue
@@ -219,14 +267,32 @@ Rules:
 - Output ONLY raw Dockerfile content.
 """
         try:
+            def _invoke_docker(raw_prompt: str):
+                try:
+                    return llm_docker.invoke(raw_prompt, config=config)
+                except TypeError:
+                    return llm_docker.invoke(raw_prompt)
+
             response, _, _ = invoke_with_retry(
-                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt, config=config),
+                invoke_fn=_invoke_docker,
                 prompt=prompt,
                 fallback_prompt=FALLBACK_PROMPTS["docker"],
                 config=RETRY_CONFIGS["docker"],
                 node_name="feedback_dockerfile_improver",
             )
-            updated[svc_name] = strip_markdown_wrapper(response.content, lang="dockerfile")
+            improved = strip_markdown_wrapper(response.content, lang="dockerfile")
+            mapped_service = service_by_dockerfile.get(svc_name, {})
+            improved = _repair_dockerfile_output(
+                improved,
+                service={
+                    "name": mapped_service.get("name", svc_name),
+                    "build_context": mapped_service.get("build_context", "."),
+                    "port": mapped_service.get("port", 8000),
+                },
+                key_files=scan.get("key_files", {}) if isinstance(scan, dict) else {},
+                available_scripts=[],
+            )
+            updated[svc_name] = improved
         except Exception:
             updated[svc_name] = current_dockerfile
 
@@ -240,6 +306,7 @@ def compose_improver_node(state: Dict[str, Any], config: RunnableConfig = None) 
     services = state.get("services", [])
     feedback = state.get("feedback", "")
     plan = state.get("change_plan", [])
+    scan = state.get("repo_scan", {})
 
     instruction = _get_instruction(plan, artifact_type="compose")
     if not instruction.should_change:
@@ -266,14 +333,21 @@ Rules:
 - Output ONLY raw YAML.
 """
     try:
+        def _invoke_compose(raw_prompt: str):
+            try:
+                return llm_compose.invoke(raw_prompt, config=config)
+            except TypeError:
+                return llm_compose.invoke(raw_prompt)
+
         response, _, _ = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt, config=config),
+            invoke_fn=_invoke_compose,
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["compose"],
             config=RETRY_CONFIGS["compose"],
             node_name="feedback_compose_improver",
         )
-        state["docker_compose"] = strip_markdown_wrapper(response.content, lang="yaml")
+        improved = strip_markdown_wrapper(response.content, lang="yaml")
+        state["docker_compose"] = _repair_compose_output(improved, services, scan if isinstance(scan, dict) else {})
     except Exception:
         state["docker_compose"] = current_compose
 
@@ -285,6 +359,8 @@ def nginx_improver_node(state: Dict[str, Any], config: RunnableConfig = None) ->
     services = state.get("services", [])
     feedback = state.get("feedback", "")
     plan = state.get("change_plan", [])
+    scan = state.get("repo_scan", {})
+    _, _, include_ws = _infer_route_flags(scan if isinstance(scan, dict) else {}, services)
 
     instruction = _get_instruction(plan, artifact_type="nginx")
     if not instruction.should_change:
@@ -310,15 +386,22 @@ Rules:
 - Output ONLY raw nginx config.
 """
     try:
+        def _invoke_nginx(raw_prompt: str):
+            try:
+                return llm_nginx.invoke(raw_prompt, config=config)
+            except TypeError:
+                return llm_nginx.invoke(raw_prompt)
+
         response, _, _ = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt, config=config),
+            invoke_fn=_invoke_nginx,
             prompt=prompt,
             fallback_prompt=FALLBACK_PROMPTS["nginx"],
             config=RETRY_CONFIGS["nginx"],
             node_name="feedback_nginx_improver",
         )
         raw_nginx = strip_markdown_wrapper(response.content, lang="nginx")
-        state["nginx_conf"] = raw_nginx[5:] if raw_nginx.startswith("conf\n") else raw_nginx
+        normalized = raw_nginx[5:] if raw_nginx.startswith("conf\n") else raw_nginx
+        state["nginx_conf"] = _repair_nginx_output(normalized, services, include_ws=include_ws)
     except Exception:
         state["nginx_conf"] = current_nginx
 
@@ -332,6 +415,8 @@ def feedback_verifier_node(state: Dict[str, Any], config: RunnableConfig = None)
     feedback = state.get("feedback", "")
     services = state.get("services", [])
     detected_stack = state.get("detected_stack", "unknown")
+    package_path = state.get("package_path", ".")
+    build_verification = state.get("build_verification", {})
 
     hadolint_results: Dict[str, str] = {}
     for service_name, content in dockerfiles.items():
@@ -364,17 +449,57 @@ Return confidence (0.0-1.0) and risks list. Each risk must be one separate item.
     try:
         def _invoke_verifier(raw_prompt: str):
             structured_llm = llm_verifier.with_structured_output(VerifierOutput)
-            return structured_llm.invoke(raw_prompt, config=config)
+            try:
+                return structured_llm.invoke(raw_prompt, config=config)
+            except TypeError:
+                return structured_llm.invoke(raw_prompt)
 
-        result, _, _ = invoke_with_retry(
+        result, attempts_used, fallback_used = invoke_with_retry(
             invoke_fn=_invoke_verifier,
             prompt=verifier_prompt,
             fallback_prompt=FALLBACK_PROMPTS["verifier"],
             config=RETRY_CONFIGS["verifier"],
             node_name="feedback_verifier",
         )
-        state["confidence"] = result.confidence
-        state["risks"] = result.risks
+        filtered_risks = _filter_risks(
+            result.risks,
+            services,
+            dockerfiles,
+            docker_compose,
+            nginx_conf,
+            package_path=package_path,
+        )
+        preflight_state = preflight_node(
+            {
+                "services": services,
+                "dockerfiles": dockerfiles,
+                "repo_scan": state.get("repo_scan", {}),
+            }
+        )
+        preflight_issues = preflight_state.get("preflight_issues", []) if isinstance(preflight_state, dict) else []
+        filtered_risks.extend([str(issue) for issue in preflight_issues])
+        state["confidence"] = _compute_deterministic_confidence(
+            services=services,
+            dockerfiles=dockerfiles,
+            docker_compose=docker_compose,
+            nginx_conf=nginx_conf,
+            risks=filtered_risks,
+            build_verification=build_verification,
+            preflight_issues=preflight_issues,
+            package_path=package_path,
+        )
+        state["risks"] = filtered_risks
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["feedback_verifier"] = {
+            "llm_confidence_raw": result.confidence,
+            "llm_risks_raw": result.risks,
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+            "preflight_issues": preflight_issues,
+        }
+        state["llm_outputs"] = llm_outputs
     except Exception as e:
         state["confidence"] = 0.5
         state["risks"] = [f"Verifier failed to run: {e}"]
@@ -416,6 +541,10 @@ def build_feedback_initial_state(cached_result: Dict[str, Any], feedback: str) -
         "prior_hadolint_results": dict(cached_result.get("hadolint_results", {})),
         "prior_feedbacks": list(cached_result.get("prior_feedbacks", [])),
         "feedback_round": cached_result.get("feedback_round", 0) + 1,
+        "package_path": cached_result.get("_cache_package_path", "."),
+        "repo_scan": cached_result.get("repo_scan", {}),
+        "build_verification": cached_result.get("build_verification", {}),
+        "llm_outputs": dict(cached_result.get("llm_outputs", {})),
     }
 
 def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -432,6 +561,7 @@ def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "risks": result.get("risks", []),
         "confidence": result.get("confidence", 0.5),
         "hadolint_results": result.get("hadolint_results", {}),
+        "llm_outputs": result.get("llm_outputs", {}),
         "feedback_round": result.get("feedback_round", 1),
     }
     prior_feedbacks = list(result.get("prior_feedbacks", []))
@@ -442,8 +572,14 @@ def format_feedback_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def run_feedback_improvement(cached_result: Dict[str, Any], feedback: str) -> Dict[str, Any]:
+def run_feedback_improvement(
+    cached_result: Dict[str, Any],
+    feedback: str,
+    context: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Run multi-agent feedback remediation and return AnalyzeResponse-shaped data."""
     initial_state = build_feedback_initial_state(cached_result, feedback)
+    if isinstance(context, dict):
+        initial_state.update(context)
     result = feedback_graph.invoke(initial_state)
     return format_feedback_result(result)
