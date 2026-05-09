@@ -1,11 +1,7 @@
 from typing import Dict, Any
-import json
 import re
 import yaml
 from langchain_core.runnables.config import RunnableConfig
-from .llm_config import llm_compose, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
-from graph.llm_retry import invoke_with_retry
-from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 
 
 def _normalize_path(path: str) -> str:
@@ -536,107 +532,7 @@ def compose_generator_node(state: Dict[str, Any], config: RunnableConfig = None)
             existing_compose = content
             break
     
-    services_desc = "\n".join([
-        (
-            f"  - {s['name']}: build context={s['build_context']}, "
-            f"dockerfile={s.get('dockerfile_path') or 'Dockerfile'}, port={s['port']}"
-        )
-        for s in services
-    ])
-
-    examples = fetch_reference_examples(
-        artifact_type="compose",
-        detected_stack=state.get("detected_stack", "unknown"),
-        stack_tokens=state.get("stack_tokens", []),
-        service=None,
-        limit=3,
-    )
-    references = format_examples_for_prompt(examples)
-    
     baseline_compose = existing_compose if isinstance(existing_compose, str) and existing_compose.strip() else _build_deterministic_compose(services)
     baseline_compose = _repair_compose_output(baseline_compose, services, scan)
-
-    if existing_compose:
-        prompt = f"""
-You are a DevOps expert refining a deterministic baseline docker-compose.yml.
-
-Services in this repo:
-{services_desc}
-
-Stack: {state.get('detected_stack', 'unknown')}
-
-DETERMINISTIC BASELINE docker-compose.yml:
-{baseline_compose}
-
-EXISTING docker-compose.yml:
-{existing_compose}
-
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
-
-Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
-
-Rules:
-- Each app service should build from its respective directory with the correct Dockerfile.
-- For pnpm monorepos with a root lockfile, prefer `build.context: .` and service Dockerfiles like `apps/backend/Dockerfile`.
-- If two services use the same Dockerfile filename (for example both are named Dockerfile), keep them as separate services when build contexts differ.
-- Every declared app service must define a ports mapping list (for example: "3000:3000").
-- Avoid dev-only bind mounts for app code in production compose output.
-- `NEXT_PUBLIC_BACKEND_URL` must be externally configurable (for example `${{NEXT_PUBLIC_BACKEND_URL}}`), not internal Docker DNS like `http://backend:5000`.
-- Add external services (postgres, redis, etc.) if the codebase references them but they're missing.
-- Use environment variables for credentials (with placeholder values).
-- Output ONLY YAML, no markdown wrappers.
-- Do NOT include any explanations, analysis, or commentary. Return ONLY the raw YAML content.
-- Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
-"""
-    else:
-        prompt = f"""
-    You are a DevOps expert refining a deterministic baseline docker-compose.yml.
-
-Services to include:
-{services_desc}
-
-Stack: {state.get('detected_stack', 'unknown')}
-Repo scan: {json.dumps(scan, indent=2)}
-
-DETERMINISTIC BASELINE docker-compose.yml:
-{baseline_compose}
-
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
-
-Improve the baseline compose file using these rules:
-- Each app service should build from its respective build context directory with the correct Dockerfile.
-- For pnpm monorepos with a root lockfile, prefer `build.context: .` and service Dockerfiles like `apps/backend/Dockerfile`.
-- If two services use the same Dockerfile filename (for example both are named Dockerfile), keep them as separate services when build contexts differ.
-- Every declared app service must define a ports mapping list (for example: "3000:3000").
-- Avoid dev-only bind mounts for app code in production compose output.
-- `NEXT_PUBLIC_BACKEND_URL` must be externally configurable (for example `${{NEXT_PUBLIC_BACKEND_URL}}`), not internal Docker DNS like `http://backend:5000`.
-- Infer any external services needed (postgres, redis, etc.) from the codebase and add them.
-- Use environment variables for credentials (with placeholder values).
-- Use volumes for data persistence.
-- Output ONLY YAML, no markdown wrappers.
-- Do NOT include any explanations, analysis, or commentary. Return ONLY the raw YAML content.
-- Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
-"""
-
-    try:
-        response, attempts_used, fallback_used = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt, config=config),
-            prompt=prompt,
-            fallback_prompt=FALLBACK_PROMPTS["compose"],
-            config=RETRY_CONFIGS["compose"],
-            node_name="compose_gen",
-        )
-        compose = strip_markdown_wrapper(response.content, lang="yaml")
-        compose = _repair_compose_output(compose, services, scan)
-        state["docker_compose"] = compose
-        state["compose_retry_attempts"] = attempts_used
-        state["compose_fallback_used"] = fallback_used
-    except Exception as e:
-        state["docker_compose"] = baseline_compose
-        state["compose_retry_attempts"] = RETRY_CONFIGS["compose"].max_attempts
-        state["compose_fallback_used"] = True
-        state["compose_generation_warning"] = f"llm_refine_failed:{e}"
-    
+    state["docker_compose"] = baseline_compose
     return state
