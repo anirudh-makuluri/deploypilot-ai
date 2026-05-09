@@ -1,4 +1,5 @@
-from graph.nodes.scanner import _pick_best_cached_response
+import graph.nodes.scanner as scanner_module
+from graph.nodes.scanner import _pick_best_cached_response, _hydrate_root_workspace_signals
 
 
 def test_pick_best_cached_response_root_prefers_full_repo_cache():
@@ -65,3 +66,42 @@ def test_pick_best_cached_response_package_uses_exact_package_cache():
     assert picked is not None
     assert picked["_cache_package_path"] == "apps/web"
     assert picked["stack_summary"] == "Next.js"
+
+
+def test_hydrate_root_workspace_signals_for_scoped_package(monkeypatch):
+    scoped_scan = {
+        "commit_sha": "abc",
+        "key_files": {
+            "apps/dashboard/package.json": "{\"name\":\"dashboard\"}",
+        },
+        "dirs": ["apps/dashboard", "apps/dashboard/src"],
+    }
+
+    class _FakeFetch:
+        def invoke(self, _payload):
+            return {
+                "commit_sha": "abc",
+                "key_files": {
+                    "package.json": "{\"workspaces\":[\"apps/*\"]}",
+                    "pnpm-lock.yaml": "lockfileVersion: '9.0'",
+                    "pnpm-workspace.yaml": "packages:\\n  - apps/*\\n",
+                    "turbo.json": "{\"pipeline\":{}}",
+                },
+                "dirs": ["apps", "packages", "apps/dashboard"],
+            }
+
+    monkeypatch.setattr(scanner_module, "fetch_repo_structure", _FakeFetch())
+
+    hydrated = _hydrate_root_workspace_signals(
+        scoped_scan,
+        repo_url="https://github.com/acme/repo",
+        github_token=None,
+        max_files=50,
+        package_path="apps/dashboard",
+    )
+
+    assert "package.json" in hydrated["key_files"]
+    assert "pnpm-lock.yaml" in hydrated["key_files"]
+    assert "pnpm-workspace.yaml" in hydrated["key_files"]
+    assert "turbo.json" in hydrated["key_files"]
+    assert "packages" in hydrated["dirs"]
