@@ -23,6 +23,7 @@ class StateDict(TypedDict, total=False):
     package_path: str
     repo_url: str
     github_token: str | None
+    repo_scan: Dict[str, Any]
     scan_results: Dict[str, Any]
     plan: Dict[str, Any]
     commands: list | None
@@ -32,6 +33,21 @@ class StateDict(TypedDict, total=False):
     verification_results: Dict[str, Any] | None
     preflight_checks: Dict[str, Any] | None
     final_output: Dict[str, Any] | None
+    commit_sha: str
+    stack_tokens: list
+    detected_stack: str
+    dockerfiles: Dict[str, str]
+    docker_compose: str
+    nginx_conf: str
+    max_files: int
+    service_name: str | None
+    build_verification: Dict[str, Any]
+    preflight_issues: list
+    risks: list
+    confidence: float
+    hadolint_results: Dict[str, Any]
+    llm_outputs: Dict[str, Any]
+    extraction_result: Dict[str, Any]
 
 
 workflow = StateGraph(StateDict)
