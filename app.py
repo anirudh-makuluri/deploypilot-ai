@@ -101,14 +101,12 @@ class DeleteCacheResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    repo_url: str
-    commit_sha: str
-    package_path: str = "."
-    feedback: str
-    github_token: Optional[str] = None
-    failure_summary: Optional[str] = None
-    failure_logs: Optional[str] = None
-    failed_artifact_scope: Optional[str] = None
+    response_id: str = Field(..., description="The response_id from the initial /analyze call")
+    feedback: str = Field(..., description="User feedback describing the issue or desired changes")
+    failure_summary: Optional[str] = Field(None, description="Brief description of deployment failure")
+    failure_logs: Optional[str] = Field(None, description="Full deployment failure logs")
+    failed_artifact_scope: Optional[str] = Field(None, description="Which artifact failed (e.g., 'dockerfile', 'compose')")
+    github_token: Optional[str] = Field(None, description="GitHub token (optional, for private repos)")
 
 
 class ResponseStatusRequest(BaseModel):
@@ -264,6 +262,41 @@ def _fetch_cached_analysis_or_404(repo_url: str, commit_sha: str, package_path: 
         cached_result.setdefault("response_id", response_id)
 
     return supabase, cached_result
+
+
+def _fetch_cached_analysis_by_response_id(response_id: str):
+    from db import supabase
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    try:
+        existing = (
+            supabase.table("analysis_cache")
+            .select("result,repo_url,commit_sha,package_path")
+            .eq("response_id", response_id)
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"No analysis found for response_id: {response_id}")
+
+    data_dict = cast(Dict[str, Any], existing.data) if existing.data else {}
+    cached_result = data_dict.get("result") if data_dict else None
+    if not cached_result:
+        raise HTTPException(status_code=404, detail=f"No analysis found for response_id: {response_id}")
+    
+    repo_url = data_dict.get("repo_url", "")
+    commit_sha = data_dict.get("commit_sha", "")
+    package_path = data_dict.get("package_path", ".")
+    
+    if not repo_url or not commit_sha:
+        raise HTTPException(status_code=500, detail="Cached analysis missing repo metadata")
+    
+    if isinstance(cached_result, dict):
+        cached_result.setdefault("response_id", response_id)
+
+    return supabase, cached_result, repo_url, commit_sha, package_path
 
 
 def _fetch_cached_analysis_or_404_service_aware(
@@ -754,14 +787,14 @@ async def analyze_repo_stream(req: AnalyzeRequest, authorization: Optional[str] 
 async def improve_with_feedback(req: FeedbackRequest):
     from graph.feedback import run_feedback_improvement
 
-    # 1. Fetch existing cached analysis
-    supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
+    # 1. Look up cached analysis by response_id
+    supabase, cached_result, repo_url, commit_sha, package_path = _fetch_cached_analysis_by_response_id(req.response_id)
 
     # 2. Regenerate artifacts guided by the feedback
     tracker = TokenTracker()
     try:
         context = {
-            "repo_url": req.repo_url,
+            "repo_url": repo_url,
             "github_token": req.github_token,
             "deployment_failure_summary": req.failure_summary,
             "deployment_failure_logs": req.failure_logs,
@@ -787,8 +820,8 @@ async def improve_with_feedback(req: FeedbackRequest):
     )
     
     response = AnalyzeResponse(
-        response_id=str(uuid4()),
-        commit_sha=req.commit_sha,
+        response_id=req.response_id,
+        commit_sha=commit_sha,
         stack_tokens=improved.get("stack_tokens", []),
         files=files,
         risks=risks,
@@ -804,24 +837,24 @@ async def improve_with_feedback(req: FeedbackRequest):
         supabase.table("analysis_cache").upsert(
             {
                 "response_id": response.response_id,
-                "repo_url": req.repo_url,
-                "commit_sha": req.commit_sha,
-                "package_path": cached_result.get("_cache_package_path", "."),
+                "repo_url": repo_url,
+                "commit_sha": commit_sha,
+                "package_path": package_path,
                 "service_name": None,
                 "result": result_dict,
             },
             on_conflict="repo_url,commit_sha,package_path,service_name",
         ).execute()
-        print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
+        print(f"Updated feedback-improved cache for {repo_url}@{commit_sha}")
     except Exception as e:
         print(f"Failed to update cache after feedback improvement: {e}")
     _store_response_log(
         supabase,
         response_id=response.response_id or str(uuid4()),
         endpoint="/feedback",
-        repo_url=req.repo_url,
-        commit_sha=req.commit_sha,
-        package_path=req.package_path,
+        repo_url=repo_url,
+        commit_sha=commit_sha,
+        package_path=package_path,
         service_name=None,
         from_cache=False,
         payload=result_dict,
@@ -838,7 +871,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
         tracker = TokenTracker()
 
         try:
-            supabase, cached_result = _fetch_cached_analysis_or_404(req.repo_url, req.commit_sha, req.package_path)
+            supabase, cached_result, repo_url, commit_sha, package_path = _fetch_cached_analysis_by_response_id(req.response_id)
         except HTTPException as e:
             yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
             return
@@ -846,7 +879,7 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
         initial_state = build_feedback_initial_state(cached_result, req.feedback)
         initial_state.update(
             {
-                "repo_url": req.repo_url,
+                "repo_url": repo_url,
                 "github_token": req.github_token,
                 "deployment_failure_summary": req.failure_summary,
                 "deployment_failure_logs": req.failure_logs,
@@ -886,8 +919,8 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
             )
             
             response = AnalyzeResponse(
-                response_id=str(uuid4()),
-                commit_sha=req.commit_sha,
+                response_id=req.response_id,
+                commit_sha=commit_sha,
                 stack_tokens=improved.get("stack_tokens", []),
                 files=files,
                 risks=risks,
@@ -897,20 +930,20 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
 
             result_dict = response.model_dump() if hasattr(response, "model_dump") else response.dict()
             result_dict["llm_outputs"] = improved.get("llm_outputs", {})
-            result_dict["_cache_package_path"] = cached_result.get("_cache_package_path", ".")
+            result_dict["_cache_package_path"] = package_path
             try:
                 supabase.table("analysis_cache").upsert(
                     {
                         "response_id": response.response_id,
-                        "repo_url": req.repo_url,
-                        "commit_sha": req.commit_sha,
-                        "package_path": cached_result.get("_cache_package_path", "."),
+                        "repo_url": repo_url,
+                        "commit_sha": commit_sha,
+                        "package_path": package_path,
                         "service_name": None,
                         "result": result_dict,
                     },
                     on_conflict="repo_url,commit_sha,package_path,service_name",
                 ).execute()
-                print(f"Updated feedback-improved cache for {req.repo_url}@{req.commit_sha}")
+                print(f"Updated feedback-improved cache for {repo_url}@{commit_sha}")
             except Exception as e:
                 print(f"Failed to update cache after feedback improvement: {e}")
 
@@ -919,9 +952,9 @@ async def improve_with_feedback_stream(req: FeedbackRequest):
                 supabase,
                 response_id=response.response_id or str(uuid4()),
                 endpoint="/feedback/stream",
-                repo_url=req.repo_url,
-                commit_sha=req.commit_sha,
-                package_path=req.package_path,
+                repo_url=repo_url,
+                commit_sha=commit_sha,
+                package_path=package_path,
                 service_name=None,
                 from_cache=False,
                 payload=result_dict,
