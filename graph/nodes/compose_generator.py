@@ -32,7 +32,8 @@ def _build_deterministic_compose(services: list[dict[str, Any]]) -> str:
         build_context = str(svc.get("build_context", ".") or ".")
         dockerfile_path = _normalize_dockerfile_path(str(svc.get("dockerfile_path", "") or ""))
         try:
-            port_int = int(svc.get("port")) if svc.get("port") is not None else None
+            port = svc.get("port")
+            port_int = int(port) if port is not None else None
         except (TypeError, ValueError):
             port_int = None
 
@@ -185,8 +186,9 @@ def _strip_next_public_env(entry: dict[str, Any]) -> bool:
             entry["environment"] = filtered
     elif isinstance(env, dict):
         to_delete = [key for key in env.keys() if str(key).startswith("NEXT_PUBLIC_")]
-        for key in to_delete:
-            env.pop(key, None)
+        if to_delete:
+            for key in to_delete:
+                env.pop(key, None)
             changed = True
 
     return changed
@@ -244,7 +246,7 @@ def _strip_dev_bind_mounts(entry: dict[str, Any]) -> bool:
             if source.startswith("./") or source.startswith("../"):
                 changed = True
                 continue
-        if isinstance(volume, dict):
+        elif isinstance(volume, dict):
             vol_type = str(volume.get("type", "")).strip().lower()
             source = str(volume.get("source", "")).strip()
             if vol_type == "bind" or source.startswith("./") or source.startswith("../"):
@@ -447,7 +449,8 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
                 continue
 
             try:
-                expected_port = int(expected.get("port")) if expected.get("port") is not None else None
+                port_value = expected.get("port")
+                expected_port = int(port_value) if port_value is not None else None
             except (TypeError, ValueError):
                 expected_port = None
 
@@ -471,8 +474,8 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
         changed = True
 
     # If dependency services are removed, remove orphaned named volumes.
-    if isinstance(parsed.get("volumes"), dict):
-        volume_map = parsed.get("volumes")
+    volumes_block = parsed.get("volumes")
+    if isinstance(volumes_block, dict):
         used_named_volumes: set[str] = set()
         for entry in services_block.values():
             if not isinstance(entry, dict):
@@ -491,9 +494,9 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
                         if source:
                             used_named_volumes.add(source)
 
-        for volume_name in list(volume_map.keys()):
+        for volume_name in list(volumes_block.keys()):
             if volume_name not in used_named_volumes:
-                volume_map.pop(volume_name, None)
+                volumes_block.pop(volume_name, None)
                 changed = True
 
     # Add explicit network configuration for clearer service isolation.
@@ -518,16 +521,20 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
     return yaml.safe_dump(parsed, sort_keys=False)
 
 
-def compose_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def compose_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate a docker-compose.yml for all services."""
     scan = state.get("repo_scan", {})
-    key_files = scan.get("key_files", {})
+    key_files = scan.get("key_files", {}) if isinstance(scan, dict) else {}
+    if not isinstance(key_files, dict):
+        key_files = {}
     services = state.get("services", [])
+    if not isinstance(services, list):
+        services = []
     
     # Check for existing docker-compose
     existing_compose = None
     for path, content in key_files.items():
-        filename = path.split("/")[-1]
+        filename = str(path).split("/")[-1]
         if filename in ("docker-compose.yml", "docker-compose.yaml"):
             existing_compose = content
             break

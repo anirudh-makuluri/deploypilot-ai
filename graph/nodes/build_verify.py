@@ -117,7 +117,7 @@ def build_verify_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            combined = (exc.stdout or "") + "\n" + (exc.stderr or "")
+            combined = (str(exc.stdout) or "") + "\n" + (str(exc.stderr) or "")
             state["build_verification"] = _build_verification_result(
                 status="failed",
                 message=f"Railpack build timed out after {timeout_seconds}s.",
@@ -125,7 +125,7 @@ def build_verify_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 duration_seconds=time.monotonic() - started,
             )
             return state
-        logs = (railpack_result.stdout or "") + "\n" + (railpack_result.stderr or "")
+        logs = (str(railpack_result.stdout) or "") + "\n" + (str(railpack_result.stderr) or "")
         state["build_verification"] = _build_verification_result(
             status="passed" if railpack_result.returncode == 0 else "failed",
             message="Railpack build succeeded." if railpack_result.returncode == 0 else "Railpack build failed.",

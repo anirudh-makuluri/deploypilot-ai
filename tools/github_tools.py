@@ -132,6 +132,20 @@ def _is_deploy_relevant_blob(path: str, package_path: str, fetch_markdown: bool)
         "vite.config.ts",
         "nuxt.config.js",
         "nuxt.config.ts",
+        "webpack.config.js",
+        "webpack.config.ts",
+        "webpack.config.mjs",
+        "webpack.config.cjs",
+        "gulpfile.js",
+        "gulpfile.cjs",
+        "gulpfile.ts",
+        "config.js",
+        "config.cjs",
+        "config.mjs",
+        ".env",
+        ".env.example",
+        ".env.local",
+        ".env.production",
         "caddyfile",
     }
 
@@ -139,6 +153,12 @@ def _is_deploy_relevant_blob(path: str, package_path: str, fetch_markdown: bool)
         return True
     if lower_name == "dockerfile" or lower_name.startswith("dockerfile.") or lower_name.endswith(".dockerfile"):
         return True
+    # Include config/*.js, config/*.cjs, config/*.mjs files for port/stack extraction
+    if "/" in normalized:
+        parent_dir = normalized.rsplit("/", 1)[0]
+        if parent_dir.endswith("/config") or parent_dir == "config":
+            if lower_name.endswith((".js", ".cjs", ".mjs", ".ts")):
+                return True
     if fetch_markdown and _is_relevant_markdown_file(normalized, package_path):
         return True
     return False

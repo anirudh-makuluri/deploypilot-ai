@@ -1,5 +1,6 @@
 from langgraph.graph import StateGraph, END
-from typing import Dict, Any
+from langchain_core.runnables.config import RunnableConfig
+from typing import Dict, Any, TypedDict
 
 from .nodes import (
     scanner_node,
@@ -13,18 +14,52 @@ from .nodes import (
     preflight_node,
 )
 
-# State is a plain dict
-workflow = StateGraph(dict)
 
-workflow.add_node("scanner", scanner_node)
-workflow.add_node("planner", planner_node)
-workflow.add_node("commands_gen", commands_generator_node)
-workflow.add_node("docker_gen", dockerfile_generator_node)
-workflow.add_node("compose_gen", compose_generator_node)
-workflow.add_node("nginx_gen", nginx_generator_node)
-workflow.add_node("verifier", verifier_node)
-workflow.add_node("build_verify", build_verify_node)
-workflow.add_node("preflight", preflight_node)
+class StateDict(TypedDict, total=False):
+    """State schema for the artifact generation workflow."""
+    error: str | None
+    cached_response: Dict[str, Any] | None
+    services: list | None
+    package_path: str
+    repo_url: str
+    github_token: str | None
+    scan_results: Dict[str, Any]
+    plan: Dict[str, Any]
+    commands: list | None
+    docker_generated: str | None
+    compose_generated: str | None
+    nginx_generated: str | None
+    verification_results: Dict[str, Any] | None
+    preflight_checks: Dict[str, Any] | None
+    final_output: Dict[str, Any] | None
+
+
+workflow = StateGraph(StateDict)
+
+# Wrap nodes to handle RunnableConfig parameter properly
+def _wrap_node_with_config(node_func):
+    """Wrap node function to handle optional RunnableConfig parameter."""
+    def wrapper(state: StateDict, config: RunnableConfig | None = None) -> StateDict:  # type: ignore
+        if config is not None:
+            return node_func(state, config=config)  # type: ignore
+        return node_func(state)  # type: ignore
+    return wrapper
+
+def _wrap_node_simple(node_func):
+    """Wrap simple node function without config parameter."""
+    def wrapper(state: StateDict) -> StateDict:  # type: ignore
+        return node_func(state)  # type: ignore
+    return wrapper
+
+workflow.add_node("scanner", _wrap_node_simple(scanner_node))
+workflow.add_node("planner", _wrap_node_with_config(planner_node))
+workflow.add_node("commands_gen", _wrap_node_simple(commands_generator_node))
+workflow.add_node("docker_gen", _wrap_node_with_config(dockerfile_generator_node))
+workflow.add_node("compose_gen", _wrap_node_with_config(compose_generator_node))
+workflow.add_node("nginx_gen", _wrap_node_with_config(nginx_generator_node))
+workflow.add_node("build_verify", _wrap_node_simple(build_verify_node))
+workflow.add_node("preflight", _wrap_node_simple(preflight_node))
+workflow.add_node("verifier", _wrap_node_with_config(verifier_node))
 
 
 # ─── Conditional Edges ──────────────────────────────────────────────────────────

@@ -249,7 +249,7 @@ def _compute_deterministic_confidence(
         if name and not isinstance(dockerfiles.get(name), str):
             missing_dockerfiles += 1
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 0)) if svc.get("port") is not None else 0
             if port <= 0:
                 missing_ports += 1
         except (TypeError, ValueError):
@@ -294,7 +294,7 @@ def _compute_deterministic_confidence(
     bounded = max(0.1, min(0.99, score))
     return round(bounded, 2)
 
-def verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def verifier_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Review all generated artifacts and assign confidence + risks."""
     scan = state.get("repo_scan", {})
     services = state.get("services", [])
@@ -380,17 +380,7 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             filtered_risks.append("Railpack build verification unavailable on this host.")
         filtered_risks.extend(preflight_issues)
         state["risks"] = filtered_risks
-        state["confidence"] = _compute_deterministic_confidence(
-            services=services,
-            dockerfiles=dockerfiles,
-            docker_compose=docker_compose,
-            nginx_conf=nginx_conf,
-            risks=filtered_risks,
-            build_verification=build_verification,
-            preflight_issues=preflight_issues,
-            package_path=package_path,
-        )
-        state["llm_confidence_raw"] = result.confidence
+        state["confidence"] = result.confidence 
         state["hadolint_results"] = hadolint_results
         state["verifier_retry_attempts"] = attempts_used
         state["verifier_fallback_used"] = fallback_used

@@ -131,7 +131,7 @@ def _infer_frontend_port(services: list[dict[str, Any]]) -> int:
         if not isinstance(svc, dict):
             continue
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 3000))
         except (TypeError, ValueError):
             continue
         if port == 3000:
@@ -173,7 +173,7 @@ def _infer_backend_port(services: list[dict[str, Any]]) -> int:
         if not isinstance(svc, dict):
             continue
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 5000))
         except (TypeError, ValueError):
             continue
         if port == 5000:
@@ -274,7 +274,7 @@ def _infer_route_guidance(scan: Dict[str, Any], services: list[dict[str, Any]]) 
     )
 
 
-def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate an nginx.conf for production deployment with multi-service routing."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})

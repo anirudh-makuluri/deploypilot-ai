@@ -759,6 +759,7 @@ def _inject_command_hints_into_template(
     dockerfile_content: str,
     service: dict[str, Any],
     command_hints: dict[str, str] | None,
+    available_scripts: list[str] | None = None,
 ) -> str:
     """Inject commands_gen install/build/run hints into a matched template Dockerfile."""
     if not dockerfile_content.strip():
@@ -822,7 +823,22 @@ def _inject_command_hints_into_template(
     if run_cmd:
         # Avoid dev server defaults in production Dockerfiles.
         if any(token in run_cmd.lower() for token in (" dev", " run dev", "vite dev")):
-            run_cmd = ""
+            if available_scripts:
+                scripts = {str(s).strip().lower() for s in available_scripts}
+                # Priority: start script is the universal production entrypoint
+                if "start" in scripts:
+                    run_cmd = "pnpm start"
+                # Vite-specific fallbacks only if no start script
+                elif "vite" in lower_template and "vite" in scripts:
+                    run_cmd = "pnpm vite"
+                elif "vite" in lower_template and "preview" in scripts:
+                    port = service.get("port", 5173)
+                    run_cmd = f'pnpm preview --host 0.0.0.0 --port {int(port)}'
+                else:
+                    run_cmd = ""
+            else:
+                run_cmd = ""
+    
     if run_cmd:
         run_parts = [part for part in run_cmd.split(" ") if part]
         if run_parts:
@@ -841,44 +857,7 @@ def _inject_command_hints_into_template(
     return updated
 
 
-def _apply_vite_start_fallback(
-    dockerfile_content: str,
-    available_scripts: list[str],
-    port: int,
-) -> str:
-    """For Vite templates, adjust start command based on available scripts.
-    
-    Priority:
-    1. Use 'start' if available
-    2. Use 'vite' if available (standard Vercel approach)
-    3. Use 'preview' as fallback
-    4. Keep template default if none found
-    """
-    scripts = {str(s).strip().lower() for s in available_scripts}
-    if "start" in scripts:
-        return dockerfile_content
-    
-    # Prefer 'vite' (production mode) over 'preview' (development preview)
-    if "vite" in scripts:
-        return re.sub(
-            r'(?im)^\s*CMD\s+\[[^\n]+\]\s*$',
-            f'CMD ["pnpm", "vite"]',
-            dockerfile_content,
-            count=1,
-        )
-    
-    if "preview" in scripts:
-        return re.sub(
-            r'(?im)^\s*CMD\s+\[[^\n]+\]\s*$',
-            f'CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "{int(port)}"]',
-            dockerfile_content,
-            count=1,
-        )
-
-    return dockerfile_content
-
-
-def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate production Dockerfiles for each service."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
@@ -984,13 +963,8 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
                 baseline_dockerfile,
                 service=service,
                 command_hints=command_hints,
+                available_scripts=available_scripts,
             )
-            if str(matched.get("name", "")).strip().lower() == "pnpm_monorepo_vite":
-                baseline_dockerfile = _apply_vite_start_fallback(
-                    baseline_dockerfile,
-                    available_scripts=available_scripts,
-                    port=int(port or 5173),
-                )
             print(f"[docker_gen] Template matched: {matched.get('name', 'unknown')} for {svc_name}")
         elif isinstance(existing_dockerfile, str) and existing_dockerfile.strip():
             baseline_dockerfile = existing_dockerfile

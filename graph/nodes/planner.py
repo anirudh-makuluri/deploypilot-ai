@@ -5,7 +5,7 @@ import os
 from langchain_core.runnables.config import RunnableConfig
 from .llm_config import llm_planner, RETRY_CONFIGS, FALLBACK_PROMPTS
 from graph.llm_retry import invoke_with_retry
-from tools.port_and_stack_extractor import extract_port_and_stack
+from tools.port_and_stack_extractor import extract_port_and_stack, extract_port_and_stack_from_key_files
 from tools.stack_tokens import (
     KNOWN_STACK_TOKENS,
     normalize_stack_tokens,
@@ -41,6 +41,7 @@ def _normalize_ctx(path: str) -> str:
 
 
 def _dedupe_services_by_context(services: List[ServiceInfo]) -> List[ServiceInfo]:
+    print(f"Deduping services by build context. Input services: {[s.model_dump() for s in services]}")
     deduped: List[ServiceInfo] = []
     seen_by_identity: dict[tuple[str, int], int] = {}
 
@@ -67,6 +68,7 @@ def _dedupe_services_by_context(services: List[ServiceInfo]) -> List[ServiceInfo
 
 def _filter_services_to_package_scope(services: List[ServiceInfo], package_path: str) -> List[ServiceInfo]:
     """Filter services to only include those that are within the queried package_path scope."""
+    print(f"Filtering services to package scope '{package_path}'. Input services: {[s.model_dump() for s in services]}")
     package_norm = _normalize_ctx(package_path)
     if package_norm == ".":
         return services
@@ -78,7 +80,7 @@ def _filter_services_to_package_scope(services: List[ServiceInfo], package_path:
         # Keep the service if it matches the package path exactly or is a sub-directory
         if svc_ctx == package_norm or svc_ctx.startswith(prefix):
             filtered.append(svc)
-            
+            print(f"  Keeping service '{svc.name}' with context '{svc_ctx}'")
     return filtered
 
 
@@ -465,6 +467,7 @@ def _apply_deterministic_fallback(
     package_path: str,
     extraction_result: Dict[str, Any],
     llm_stack_tokens: List[str] | None = None,
+    github_token: str | None = None,
 ) -> bool:
     if not extraction_result.get("success"):
         return False
@@ -487,14 +490,12 @@ def _apply_deterministic_fallback(
     # If we selected a nested child context and the parent extraction is sparse,
     # retry deterministic extraction at the chosen child for better stack fidelity.
     if not extracted_stack_tokens and fallback_build_context != _normalize_ctx(package_path):
-        repo_url = state.get("repo_url", "")
-        if repo_url:
+        key_files = scan.get("key_files", {}) if isinstance(scan, dict) else {}
+        if key_files:
             try:
-                refined = extract_port_and_stack(
-                    repo_url,
+                refined = extract_port_and_stack_from_key_files(
+                    key_files=key_files,
                     build_context=fallback_build_context,
-                    timeout=30,
-                    github_token=os.getenv("GITHUB_TOKEN"),
                 )
                 if refined.get("success"):
                     extracted_stack_tokens = refined.get("stack_tokens", []) or extracted_stack_tokens
@@ -523,28 +524,27 @@ def _apply_deterministic_fallback(
     return True
 
 
-def planner_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def planner_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Infer stack, services, and deployability from repo_scan using structured output."""
     scan = state.get("repo_scan", {})
     repo_url = state.get("repo_url", "")
     package_path = state.get("package_path", ".")
     
-    # Extract ports and stack tokens from cloned repo for deterministic signal
+    # Get github_token from state, fallback to environment variable
+    github_token = state.get("github_token") or os.getenv("GITHUB_TOKEN")
+    
+    # Extract ports and stack tokens from already-scanned key_files (no cloning needed)
     extraction_result = {}
-    if repo_url:
+    key_files = scan.get("key_files", {}) if isinstance(scan, dict) else {}
+    if key_files:
         try:
-            github_token = os.getenv("GITHUB_TOKEN")
-            extraction_result = extract_port_and_stack(
-                repo_url,
+            extraction_result = extract_port_and_stack_from_key_files(
+                key_files=key_files,
                 build_context=package_path,
-                timeout=30,
-                github_token=github_token
             )
         except Exception as e:
-            print(f"Warning: Port/stack extraction failed (proceeding with LLM only): {e}")
+            print(f"Warning: Port/stack extraction from key_files failed: {e}")
             extraction_result = {"success": False, "error": str(e)}
-    
-    github_token = os.getenv("GITHUB_TOKEN")
     extracted_port = extraction_result.get("port")
     extracted_stack_tokens = extraction_result.get("stack_tokens", [])
     extraction_context = ""
@@ -598,7 +598,10 @@ Tasks:
             * Mobile app packages (React Native/Expo/Flutter/iOS/Android) from services
             * Database/cache services (PostgreSQL, MySQL, MongoDB, Neo4j, Redis, Elasticsearch, Kafka, etc.) — these are dependencies, not applications
             * Infrastructure services (Nginx, Traefik, Prometheus, Grafana, etc.) — these are middleware/monitoring
-        - For each service, determine its name, build context directory, and port
+        - For each service, determine:
+            * name: A meaningful service identifier (e.g., 'frontend', 'api', 'websocket')
+            * build_context: The relative directory path from repo root where Docker should execute 'docker build' (e.g., '.' for root, 'apps/web' for nested service). This is where the Dockerfile or buildable files are located.
+            * port: The HTTP port the service listens on
         - If the repo has existing Dockerfile(s) in key_files, map each Dockerfile to its corresponding service using the dockerfile_path field (e.g. 'Dockerfile' for the main app, 'Dockerfile.websocket' for the websocket service)
         - Check if the repo already has a docker-compose.yml/yaml in key_files
 
@@ -684,32 +687,16 @@ Respond ONLY with a raw JSON object matching this schema. Do not include markdow
         ]
         filtered_services = _filter_services_to_package_scope(filtered_services, package_path)
         filtered_services = _dedupe_services_by_context(filtered_services)
-        service_selector = (state.get("service_name") or "").strip()
-        if service_selector:
-            selected, match_kind = _filter_services_by_selector(filtered_services, service_selector)
-            if not selected:
-                available = ", ".join(sorted({s.name for s in filtered_services if s.name})) or "none"
-                state["error"] = (
-                    f"Requested service '{service_selector}' was not found. "
-                    f"Available services: {available}"
-                )
-                return state
-            if len(selected) > 1:
-                matched = ", ".join(sorted({s.name for s in selected if s.name})) or "multiple"
-                state["error"] = (
-                    f"Requested service '{service_selector}' is ambiguous (matched by {match_kind}). "
-                    f"Matches: {matched}"
-                )
-                return state
-            filtered_services = selected
 
         if not filtered_services:
+            print("No deployable services detected by LLM. Checking for deterministic fallback conditions...")
             if _apply_deterministic_fallback(
                 state=state,
                 scan=scan,
                 package_path=package_path,
                 extraction_result=extraction_result,
                 llm_stack_tokens=data.stack_tokens,
+                github_token=github_token,
             ):
                 state["planner_retry_attempts"] = attempts_used
                 state["planner_fallback_used"] = fallback_used
