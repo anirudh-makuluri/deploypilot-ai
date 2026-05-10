@@ -170,3 +170,40 @@ def test_deterministic_confidence_does_not_penalize_missing_compose_when_not_req
     )
 
     assert confidence == 0.99
+
+
+def test_filter_risks_drops_mono_frontend_false_positives():
+    risks = [
+        "Dockerfile uses pnpm filter syntax with ellipsis (...) which may not correctly resolve monorepo dependencies",
+        "Dockerfile CMD uses 'pnpm start' but no verification that this script exists in apps/dashboard/package.json",
+        "Dockerfile does not specify pnpm version pinning - corepack enable without version lock may cause inconsistent builds",
+        "No .dockerignore file referenced - build context likely includes node_modules, .git, and other unnecessary files",
+        "Dockerfile runs as non-root user 'app' but does not verify file permissions are correct",
+    ]
+
+    filtered = _filter_risks(
+        risks,
+        services=[{"name": "dashboard", "port": 5173}],
+        dockerfiles={"dashboard": "FROM node:20-alpine\n"},
+        docker_compose="",
+        nginx_conf="",
+        package_path="apps/dashboard",
+    )
+
+    assert filtered == []
+
+
+def test_deterministic_confidence_risk_penalty_is_less_aggressive():
+    services = [{"name": "dashboard", "port": 5173}]
+    dockerfiles = {"dashboard": "FROM node:20-alpine\n"}
+
+    confidence = _compute_deterministic_confidence(
+        services=services,
+        dockerfiles=dockerfiles,
+        docker_compose="",
+        nginx_conf="",
+        risks=["r1", "r2", "r3", "r4", "r5"],
+        package_path="apps/dashboard",
+    )
+
+    assert confidence >= 0.55

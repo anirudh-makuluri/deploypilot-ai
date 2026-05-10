@@ -14,6 +14,35 @@ from db import supabase
 
 DEFAULT_TEMPLATES: List[Dict[str, Any]] = [
     {
+        "name": "pnpm_monorepo_vite",
+        "description": "pnpm workspace monorepo Vite app (production mode)",
+        "match_stack_tokens": ["pnpm", "vite"],
+        "match_signals": {"is_monorepo": True, "has_turbo": False},
+        "priority": 18,
+        "variables": {"port": 5173, "node_version": "20", "service_path": "apps/dashboard"},
+        "template_content": (
+            "FROM node:{{node_version}}-alpine AS base\n"
+            "WORKDIR /app\n"
+            "RUN addgroup -S app && adduser -S app -G app\n\n"
+            "FROM base AS deps\n"
+            "RUN apk add --no-cache libc6-compat\n"
+            "COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./\n"
+            "COPY {{service_path}}/package.json ./{{service_path}}/package.json\n"
+            "RUN corepack enable pnpm && pnpm i --frozen-lockfile --filter ./{{service_path}}...\n\n"
+            "FROM deps AS builder\n"
+            "COPY . .\n"
+            "RUN pnpm --filter ./{{service_path}}... build\n\n"
+            "FROM base AS runner\n"
+            "ENV NODE_ENV=production\n"
+            "ENV PORT={{port}}\n"
+            "WORKDIR /app/{{service_path}}\n"
+            "COPY --from=builder /app /app\n"
+            "USER app\n"
+            "EXPOSE {{port}}\n"
+            'CMD ["pnpm", "vite"]\n'
+        ),
+    },
+    {
         "name": "pnpm_monorepo_turbo",
         "description": "pnpm workspace monorepo with Turborepo (Next.js standalone)",
         "match_stack_tokens": ["next", "pnpm"],
@@ -286,9 +315,43 @@ def _score_template(
     token_score = overlap / max(len(match_tokens), 1)
     priority = float(template.get("priority", 0))
     signal_bonus = len(match_signals) * 0.1
+    soft_bonus = 0.0
+    soft_penalty = 0.0
+
+    template_name = str(template.get("name", "")).lower()
+    token_l = {str(t).lower() for t in stack_tokens}
+    service_path = str(signals.get("service_path", "") or "").strip()
+    package_path = str(signals.get("package_path", "") or "").strip()
+    is_monorepo = _coerce_bool(signals.get("is_monorepo"))
+
+    # Prefer vite-oriented templates for monorepo vite apps.
+    if "vite" in token_l and is_monorepo:
+        if "vite" in template_name:
+            soft_bonus += 0.20
+        if "monorepo" in template_name:
+            soft_bonus += 0.15
+        if template_name == "vite_static":
+            soft_penalty += 0.10
+
+    # Prefer templates whose default service_path resembles the target path shape.
+    tpl_vars = template.get("variables") or {}
+    tpl_service_path = str(tpl_vars.get("service_path", "") or "").strip()
+    if service_path and tpl_service_path:
+        if service_path == tpl_service_path:
+            soft_bonus += 0.20
+        elif service_path.startswith("apps/") and tpl_service_path.startswith("apps/"):
+            soft_bonus += 0.08
+
+    # Slight preference when package_path aligns with service_path context.
+    if package_path and service_path and package_path == service_path:
+        soft_bonus += 0.12
     
-    total = token_score + (priority * 0.01) + signal_bonus
-    print(f"  [score] {name}: {total:.3f} (token_overlap={overlap}/{len(match_tokens)}, priority={priority}, signal_bonus={signal_bonus:.1f})")
+    total = token_score + (priority * 0.01) + signal_bonus + soft_bonus - soft_penalty
+    print(
+        f"  [score] {name}: {total:.3f} "
+        f"(token_overlap={overlap}/{len(match_tokens)}, priority={priority}, "
+        f"signal_bonus={signal_bonus:.1f}, soft_bonus={soft_bonus:.2f}, soft_penalty={soft_penalty:.2f})"
+    )
     return total
 
 

@@ -322,7 +322,7 @@ Endpoint: `DELETE /cache`
 
 Purpose:
 
-- Deletes one or more cache rows for a repository.
+- Deletes cache rows linked to a previously logged response.
 
 Example:
 
@@ -331,20 +331,20 @@ curl -X DELETE http://localhost:8080/cache \
   -H "Authorization: Bearer $API_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "repo_url": "https://github.com/user/repo-name",
-    "commit_sha": "abc123def456",
-    "package_path": ".",
-    "service_name": null
+    "response_id": "b9d40111-8b00-459e-9fb8-e0d35ddbe7ac"
   }'
 ```
 
 Behavior:
 
-- `repo_url` is required.
-- Add `commit_sha` to narrow deletion to a specific revision.
-- Add `package_path` to narrow deletion to a specific monorepo scope.
-- Add `service_name` to narrow deletion to a specific service cache row.
-- If `service_name` is omitted or `null`, deletion targets rows where `service_name` is null.
+- `response_id` is required.
+- The endpoint looks up `analysis_responses.id = response_id` to resolve the exact cache key tuple:
+  - `repo_url`
+  - `commit_sha`
+  - `package_path`
+  - `service_name`
+- It then deletes matching `analysis_cache` row(s).
+- Returns `404` if the `response_id` does not exist or if no linked cache row exists.
 
 ## List Templates
 

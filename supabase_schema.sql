@@ -1,6 +1,7 @@
 -- Create the analysis_cache table
 create table public.analysis_cache (
   id uuid default gen_random_uuid() primary key,
+  response_id uuid,
   repo_url text not null,
   commit_sha text not null,
   package_path text not null default '.',
@@ -77,6 +78,36 @@ alter table public.benchmark_artifacts enable row level security;
 
 create policy "Allow service role full access to benchmark_artifacts"
   on public.benchmark_artifacts
+  as permissive
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+-- Store every API response payload for audit/debugging
+create table if not exists public.analysis_responses (
+  id uuid default gen_random_uuid() primary key,
+  endpoint text not null,
+  repo_url text not null,
+  commit_sha text,
+  package_path text not null default '.',
+  service_name text,
+  from_cache boolean not null default false,
+  passed boolean not null default false,
+  payload jsonb not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+create index if not exists idx_analysis_responses_repo_created
+  on public.analysis_responses (repo_url, created_at desc);
+
+create index if not exists idx_analysis_responses_endpoint_created
+  on public.analysis_responses (endpoint, created_at desc);
+
+alter table public.analysis_responses enable row level security;
+
+create policy "Allow service role full access to analysis_responses"
+  on public.analysis_responses
   as permissive
   for all
   to service_role

@@ -12,6 +12,7 @@ The project is built around a LangGraph workflow and supports both one-shot JSON
 - Generates `docker-compose.yml` only when multiple app services need orchestration.
 - Generates an `nginx.conf` for reverse proxying and route handling.
 - Verifies output with hadolint plus deterministic risk and confidence checks.
+- Optionally runs a Railpack build verification pass (`SD_RAILPACK_VERIFY_ENABLED=true`) to validate buildability.
 - Caches analysis results in Supabase by `repo_url + commit_sha + package_path + service_name`.
 - Supports feedback-driven regeneration against an existing cached analysis.
 - Supports example-bank retrieval and Dockerfile template management in Supabase.
@@ -28,7 +29,11 @@ graph TD
     Docker -->|Multi-service| Compose["Compose generator"]
     Docker -->|Single-service| Nginx["Nginx generator"]
     Compose --> Nginx
-    Nginx --> Verify["Verifier"]
+    Nginx --> Railpack{"Railpack verify enabled?"}
+    Railpack -->|Yes| BuildVerify["Railpack build verify"]
+    Railpack -->|No| Preflight["COPY/context preflight"]
+    BuildVerify --> Preflight
+    Preflight --> Verify
     Verify --> Save["Save to cache"]
     ReturnCache --> End(("End"))
     Save --> End
@@ -67,7 +72,7 @@ pip install -r requirements.txt
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 AWS_DEFAULT_REGION=your_aws_region
-BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+BEDROCK_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
@@ -80,13 +85,7 @@ API_BEARER_TOKEN=your_api_token
 PORT=8080
 ```
 
-4. Initialize the Supabase schema.
-
-- Run [`supabase_schema.sql`](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/supabase_schema.sql) in the Supabase SQL editor.
-- Run [`migrations/create_dockerfile_templates.sql`](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/migrations/create_dockerfile_templates.sql) as well if you want to use the template endpoints.
-- `supabase_schema.sql` creates the analysis cache, example bank, and benchmark artifact tables. The template migration creates the `dockerfile_templates` table used by `GET /templates` and the template management endpoints.
-
-5. Start the API.
+4. Start the API.
 
 ```bash
 python app.py
@@ -145,6 +144,15 @@ Configure via env vars:
 - `SD_SCOPE_GUARD_TREE_THRESHOLD` (default: `3000`)
 - `SD_SCOPE_GUARD_PACKAGE_THRESHOLD` (default: `20`)
 - `SD_FETCH_MARKDOWN` (default: `false`) to keep live scans focused on deploy-relevant files.
+- `SD_RAILPACK_VERIFY_ENABLED` (default: `false`) to run post-generation Railpack build verification.
+- `SD_RAILPACK_VERIFY_TIMEOUT_SECONDS` (default: `300`) timeout for the verification build.
+- `SD_RAILPACK_VERIFY_MAX_LOG_CHARS` (default: `8000`) max captured log excerpt in API response.
+- `SD_PREFLIGHT_STRICT` (default: `true`) fail-fast when static Dockerfile/context preflight finds issues.
+
+Each service now carries a deterministic build contract:
+- `dockerfile_path`: which Dockerfile to use
+- `build_context`: context path passed to `docker build`
+- `execution_root`: where to run the command (currently always repo root `"."`)
 
 ## API Overview
 
@@ -165,6 +173,10 @@ Cache operations:
 
 - `DELETE /cache`
 
+Response outcome operations:
+
+- `POST /responses/status` (updates pass/fail status for a `response_id`; when `passed=false`, matching cache entry is deleted)
+
 Template operations:
 
 - `GET /templates`
@@ -172,26 +184,74 @@ Template operations:
 - `POST /templates/seed`
 - `DELETE /templates/{name}`
 
-Detailed examples live in [docs/api-examples.md](/C:/Users/aniru/OneDrive/Desktop/own/sd-artifacts/docs/api-examples.md).
-
 ## Response Shape
 
 The primary analysis endpoints return:
 
-- `commit_sha`
-- `stack_summary`
-- `stack_tokens`
-- `services`
-- `dockerfiles`
-- `docker_compose`
-- `nginx_conf`
-- `has_existing_dockerfiles`
-- `has_existing_compose`
-- `risks`
-- `confidence`
-- `hadolint_results`
-- `commands`
-- `token_usage`
+- `response_id`: unique identifier for this analysis
+- `commit_sha`: git commit SHA of the analyzed code
+- `stack_tokens`: list of detected technology tokens (e.g., `["node", "react", "python"]`)
+- `files`: array of generated deployment artifacts (see format below)
+- `risks`: list of identified risks and hadolint warnings
+- `confidence`: confidence score (0.0 to 1.0) for the generated artifacts
+- `token_usage`: token counts for LLM calls (`input_tokens`, `output_tokens`, `total_tokens`)
+
+### File Artifact Format
+
+Each file in the `files` array contains:
+
+```json
+{
+  "name": "Dockerfile",
+  "content": "...",
+  "location": "apps/dashboard/Dockerfile"
+}
+```
+
+**Fields:**
+- `name`: filename (e.g., `Dockerfile`, `docker-compose.yml`, `nginx.conf`)
+- `content`: full file content (ready to write to disk)
+- `location`: full file path where the file should be placed in the repo
+  - Dockerfiles: specific to their service location (e.g., `backend/Dockerfile`, `apps/web/Dockerfile`)
+  - docker-compose.yml: root-level (`docker-compose.yml`)
+  - nginx.conf: fixed location (`/etc/nginx/conf.d/nginx.conf`)
+
+**Example response:**
+
+```json
+{
+  "response_id": "abc123",
+  "commit_sha": "def456",
+  "stack_tokens": ["node", "react"],
+  "files": [
+    {
+      "name": "Dockerfile",
+      "content": "FROM node:20-alpine\nWORKDIR /app\n...",
+      "location": "Dockerfile"
+    },
+    {
+      "name": "docker-compose.yml",
+      "content": "version: '3.8'\nservices:\n...",
+      "location": "docker-compose.yml"
+    },
+    {
+      "name": "nginx.conf",
+      "content": "upstream web { server localhost:3000; }\n...",
+      "location": "/etc/nginx/conf.d/nginx.conf"
+    }
+  ],
+  "risks": [
+    "hadolint (Dockerfile): DL3018 Pin versions in apt-get install",
+    "Base image is not pinned to a specific version"
+  ],
+  "confidence": 0.92,
+  "token_usage": {
+    "input_tokens": 2500,
+    "output_tokens": 1200,
+    "total_tokens": 3700
+  }
+}
+```
 
 Streaming endpoints emit `progress`, `complete`, and `error` events as SSE.
 

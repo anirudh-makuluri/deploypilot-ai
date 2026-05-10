@@ -1,11 +1,164 @@
 from typing import Dict, Any
 import json
 import re
+from pydantic import BaseModel, Field
 from langchain_core.runnables.config import RunnableConfig
-from .llm_config import llm_docker, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
-from graph.llm_retry import invoke_with_retry
-from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 from tools.template_store import match_template, fill_template
+
+
+class DockerfilePlan(BaseModel):
+    runtime: str = Field(description="node or python")
+    base_image: str = Field(description="Base image for build/runtime")
+    workdir: str = Field(default="/app")
+    install_cmd: str = Field(default="")
+    build_cmd: str = Field(default="")
+    run_cmd: str = Field(default="")
+    package_manager: str = Field(default="")
+    expose_port: int = Field(default=8000)
+    use_non_root_user: bool = Field(default=True)
+
+
+def _build_plan_defaults(
+    service: dict[str, Any],
+    stack_tokens: list[str],
+    available_scripts: list[str],
+    command_hints: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    tokens = {str(token).lower() for token in stack_tokens if isinstance(token, str)}
+    scripts = {str(script).strip().lower() for script in available_scripts}
+    hints = command_hints or {}
+    port = int(service.get("port", 8000) or 8000)
+
+    if "python" in tokens:
+        return {
+            "runtime": "python",
+            "base_image": "python:3.11-slim",
+            "workdir": "/app",
+            "install_cmd": str(hints.get("install") or "pip install --no-cache-dir -r requirements.txt"),
+            "build_cmd": "",
+            "run_cmd": str(hints.get("run") or f"python -m uvicorn main:app --host 0.0.0.0 --port {port}"),
+            "package_manager": "pip",
+            "expose_port": port,
+            "use_non_root_user": True,
+        }
+
+    if "pnpm" in tokens:
+        install_cmd = str(hints.get("install") or "corepack enable pnpm && pnpm i --frozen-lockfile")
+        package_manager = "pnpm"
+    elif "yarn" in tokens:
+        install_cmd = str(hints.get("install") or "yarn install --frozen-lockfile")
+        package_manager = "yarn"
+    else:
+        install_cmd = str(hints.get("install") or "npm ci")
+        package_manager = "npm"
+
+    if hints.get("build"):
+        build_cmd = str(hints.get("build"))
+    elif "build" in scripts:
+        build_cmd = f"{package_manager} {'run ' if package_manager == 'npm' else ''}build".strip()
+    else:
+        build_cmd = ""
+
+    if hints.get("run"):
+        run_cmd = str(hints.get("run"))
+    elif "start" in scripts:
+        run_cmd = "npm start" if package_manager == "npm" else f"{package_manager} start"
+    elif "vite" in scripts:
+        # Vite production mode (standard approach, used by Vercel)
+        run_cmd = "npm vite" if package_manager == "npm" else f"{package_manager} vite"
+    elif "dev" in scripts:
+        run_cmd = "npm run dev" if package_manager == "npm" else f"{package_manager} dev"
+    else:
+        run_cmd = "npm start"
+
+    return {
+        "runtime": "node",
+        "base_image": "node:20-alpine",
+        "workdir": "/app",
+        "install_cmd": install_cmd,
+        "build_cmd": build_cmd,
+        "run_cmd": run_cmd,
+        "package_manager": package_manager,
+        "expose_port": port,
+        "use_non_root_user": True,
+    }
+
+
+def _merge_plan(defaults: dict[str, Any], llm_plan: dict[str, Any]) -> DockerfilePlan:
+    merged = dict(defaults)
+    for key, value in (llm_plan or {}).items():
+        if value in (None, ""):
+            continue
+        merged[key] = value
+    return DockerfilePlan(**merged)
+
+
+def _render_dockerfile_from_plan(plan: DockerfilePlan, service: dict[str, Any]) -> str:
+    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
+    dockerfile_path_norm = _normalize_ctx(service.get("dockerfile_path", "") or "")
+    service_subpath = ""
+    if (
+        build_ctx_norm == "."
+        and dockerfile_path_norm not in ("", ".", "Dockerfile")
+        and dockerfile_path_norm.endswith("/Dockerfile")
+    ):
+        service_subpath = dockerfile_path_norm[: -len("/Dockerfile")]
+    if plan.runtime.lower() == "python":
+        run_parts = [part for part in str(plan.run_cmd).split(" ") if part]
+        cmd_json = "[" + ", ".join(f'"{part}"' for part in run_parts) + "]" if run_parts else '["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]'
+        non_root = "RUN useradd -m appuser\nUSER appuser\n" if plan.use_non_root_user else ""
+        return (
+            f"FROM {plan.base_image}\n\n"
+            f"WORKDIR {plan.workdir}\n"
+            "ENV PYTHONDONTWRITEBYTECODE=1\n"
+            "ENV PYTHONUNBUFFERED=1\n\n"
+            "COPY requirements*.txt ./\n"
+            f"RUN {plan.install_cmd}\n\n"
+            "COPY . .\n"
+            f"EXPOSE {int(plan.expose_port)}\n"
+            f"{non_root}"
+            f"CMD {cmd_json}\n"
+        )
+
+    if build_ctx_norm == ".":
+        deps_copy_commands = (
+            "COPY package*.json ./\n"
+            "COPY pnpm-lock.yaml* ./\n"
+            "COPY pnpm-workspace.yaml* ./\n"
+            "COPY yarn.lock* ./\n"
+        )
+        if service_subpath:
+            deps_copy_commands += f"COPY {service_subpath}/package.json {service_subpath}/package.json\n"
+    else:
+        # Scoped contexts can only COPY files from within that context.
+        deps_copy_commands = "COPY package*.json ./\n"
+
+    run_parts = [part for part in str(plan.run_cmd).split(" ") if part]
+    run_cmd = "CMD [" + ", ".join(f'"{part}"' for part in run_parts) + "]" if run_parts else 'CMD ["npm", "start"]'
+    if service_subpath:
+        run_cmd = f'CMD ["pnpm", "--filter", "./{service_subpath}", "start"]'
+    maybe_build = f"RUN {plan.build_cmd}\n" if str(plan.build_cmd).strip() else ""
+    if service_subpath and not str(plan.build_cmd).strip():
+        maybe_build = f"RUN pnpm --filter ./{service_subpath}... build\n"
+    user_bits = "RUN addgroup -S app && adduser -S app -G app\n" if plan.use_non_root_user else ""
+    final_user = "USER app\n" if plan.use_non_root_user else ""
+    return (
+        f"FROM {plan.base_image} AS base\n"
+        f"WORKDIR {plan.workdir}\n"
+        f"{user_bits}\n"
+        "FROM base AS deps\n"
+        f"{deps_copy_commands}"
+        f"RUN {plan.install_cmd}\n\n"
+        "FROM deps AS build\n"
+        "COPY . .\n"
+        f"{maybe_build}"
+        "FROM base AS runner\n"
+        f"WORKDIR {plan.workdir}\n"
+        f"COPY --from=build {plan.workdir} {plan.workdir}\n"
+        f"{final_user}"
+        f"EXPOSE {int(plan.expose_port)}\n"
+        f"{run_cmd}\n"
+    )
 
 
 def _extract_package_scripts(key_files: dict[str, Any], build_ctx: str) -> list[str]:
@@ -32,6 +185,10 @@ def _normalize_ctx(path: str) -> str:
     normalized = (path or ".").replace("\\", "/").strip()
     if normalized.startswith("./"):
         normalized = normalized[2:]
+    while "/./" in normalized:
+        normalized = normalized.replace("/./", "/")
+    if normalized.endswith("/."):
+        normalized = normalized[:-2]
     return normalized or "."
 
 
@@ -120,6 +277,15 @@ def _build_deterministic_dockerfile(
         )
 
     install_cmd = install_hint or "npm ci"
+    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
+    dockerfile_path_norm = _normalize_ctx(service.get("dockerfile_path", "") or "")
+    service_subpath = ""
+    if (
+        build_ctx_norm == "."
+        and dockerfile_path_norm not in ("", ".", "Dockerfile")
+        and dockerfile_path_norm.endswith("/Dockerfile")
+    ):
+        service_subpath = dockerfile_path_norm[: -len("/Dockerfile")]
     if not install_hint:
         if "pnpm" in tokens:
             install_cmd = "corepack enable pnpm && pnpm i --frozen-lockfile"
@@ -154,18 +320,25 @@ def _build_deterministic_dockerfile(
         else:
             maybe_build = "RUN npm run build\n"
 
-    deps_copy_commands = (
-        "COPY package*.json ./\n"
-        "COPY pnpm-lock.yaml* ./\n"
-        "COPY pnpm-workspace.yaml* ./\n"
-        "COPY yarn.lock* ./\n"
-    )
-    
-    # In a nested build context, the deps stage must have the nested package.json 
-    # to filter/install correctly. We copy it into the proper nested directory.
-    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
-    if build_ctx_norm != ".":
-        deps_copy_commands += f"COPY {build_ctx_norm}/package.json ./{build_ctx_norm}/package.json\n"
+    if build_ctx_norm == ".":
+        deps_copy_commands = (
+            "COPY package*.json ./\n"
+            "COPY pnpm-lock.yaml* ./\n"
+            "COPY pnpm-workspace.yaml* ./\n"
+            "COPY yarn.lock* ./\n"
+        )
+        if service_subpath:
+            deps_copy_commands += f"COPY {service_subpath}/package.json {service_subpath}/package.json\n"
+    else:
+        # Scoped contexts can only COPY files from within that context.
+        deps_copy_commands = "COPY package*.json ./\n"
+
+    if service_subpath and "pnpm i --frozen-lockfile" in install_cmd and "--filter" not in install_cmd:
+        install_cmd = f"{install_cmd} --filter ./{service_subpath}..."
+    if service_subpath:
+        run_cmd = f'CMD ["pnpm", "--filter", "./{service_subpath}", "start"]'
+        if not maybe_build.strip():
+            maybe_build = f"RUN pnpm --filter ./{service_subpath}... build\n"
 
     return (
         "FROM node:20-alpine AS base\n"
@@ -178,6 +351,7 @@ def _build_deterministic_dockerfile(
         "COPY . .\n"
         f"{maybe_build}"
         "FROM base AS runner\n"
+        "WORKDIR /app\n"
         "COPY --from=build /app /app\n"
         "USER app\n"
         f"EXPOSE {port}\n"
@@ -199,6 +373,14 @@ def _repair_dockerfile_output(
     changed = fixed != content
 
     build_ctx = _normalize_ctx(str(service.get("build_context", ".") or "."))
+    dockerfile_path_norm = _normalize_ctx(str(service.get("dockerfile_path", "") or ""))
+    service_subpath = ""
+    if (
+        build_ctx == "."
+        and dockerfile_path_norm not in ("", ".", "Dockerfile")
+        and dockerfile_path_norm.endswith("/Dockerfile")
+    ):
+        service_subpath = dockerfile_path_norm[: -len("/Dockerfile")]
     has_root_pnpm_lock = isinstance(key_files, dict) and "pnpm-lock.yaml" in key_files
     has_workspace_manifest = isinstance(key_files, dict) and "pnpm-workspace.yaml" in key_files
     has_root_package = isinstance(key_files, dict) and "package.json" in key_files
@@ -206,6 +388,31 @@ def _repair_dockerfile_output(
         (isinstance(key_files, dict) and any(str(path).startswith("packages/") for path in key_files.keys()))
         or bool(key_files.get("__has_packages_dir__"))
     )
+
+    # Scoped build contexts (e.g. apps/dashboard) cannot access repo-root files.
+    # Strip common root-level workspace copy lines regardless of install command shape.
+    if build_ctx != ".":
+        scoped_cleanup = [
+            r"(?im)^\s*COPY\s+pnpm-lock\.yaml\*?\s+\./\s*$\n?",
+            r"(?im)^\s*COPY\s+pnpm-workspace\.yaml\*?\s+\./\s*$\n?",
+        ]
+        for pattern in scoped_cleanup:
+            new_fixed = re.sub(pattern, "", fixed)
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
+        # Catch multi-source COPY variants, e.g.:
+        # COPY pnpm-lock.yaml pnpm-workspace.yaml* ./
+        scoped_lines: list[str] = []
+        for line in fixed.splitlines():
+            stripped = line.strip().lower()
+            if stripped.startswith("copy ") and "--from=" not in stripped:
+                if "pnpm-lock.yaml" in stripped or "pnpm-workspace.yaml" in stripped:
+                    changed = True
+                    continue
+            scoped_lines.append(line)
+        rebuilt = "\n".join(scoped_lines).strip()
+        fixed = (rebuilt + "\n") if rebuilt else ""
 
     # In monorepos with root lockfile, ensure service Dockerfiles copy root lockfile,
     # not a non-existent nested lockfile like apps/web/pnpm-lock.yaml.
@@ -220,8 +427,47 @@ def _repair_dockerfile_output(
                 fixed = new_fixed
                 changed = True
 
-    # In pnpm monorepos, install dependencies with workspace context from repo root.
+    # If build context is scoped (e.g. apps/dashboard), Docker cannot access repo-root
+    # workspace files. Avoid injecting root-level pnpm workspace COPY lines.
     if has_root_pnpm_lock and build_ctx != "." and "pnpm i --frozen-lockfile" in fixed:
+        # Drop monorepo root copy patterns that are invalid under scoped build contexts.
+        scoped_cleanup = [
+            r"(?im)^\s*COPY\s+pnpm-workspace\.yaml\*?\s+\./\s*$\n?",
+            r"(?im)^\s*COPY\s+pnpm-lock\.yaml\*?\s+\./\s*$\n?",
+            r"(?im)^\s*COPY\s+package\.json\s+\./\s*$\n?",
+            rf"(?im)^\s*COPY\s+{re.escape(build_ctx)}/package\.json\s+{re.escape(build_ctx)}/package\.json\s*$\n?",
+            rf"(?im)^\s*RUN\s+mkdir\s+-p\s+{re.escape(build_ctx)}\s*$\n?",
+        ]
+        for pattern in scoped_cleanup:
+            new_fixed = re.sub(pattern, "", fixed)
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
+
+        # Ensure deps stage still has at least local package.json copy.
+        if "COPY package*.json ./" not in fixed and "COPY package.json ./" not in fixed:
+            new_fixed = re.sub(
+                r"(?im)^(\s*FROM\s+base\s+AS\s+deps\s*$)",
+                r"\1\nCOPY package*.json ./",
+                fixed,
+                count=1,
+            )
+            if new_fixed != fixed:
+                fixed = new_fixed
+                changed = True
+
+        # Keep install command context-local (no --filter ./apps/... when already scoped).
+        new_fixed = re.sub(
+            r"(?im)corepack\s+enable\s+pnpm\s*&&\s*pnpm\s+i\s+--frozen-lockfile\s+--filter\s+\./[^\s]+",
+            "corepack enable pnpm && pnpm i --frozen-lockfile",
+            fixed,
+        )
+        if new_fixed != fixed:
+            fixed = new_fixed
+            changed = True
+
+    # In pnpm monorepos rooted at ".", install with workspace filter context.
+    if has_root_pnpm_lock and build_ctx == "." and "pnpm i --frozen-lockfile" in fixed:
         copy_lines: list[str] = []
         if has_root_package:
             copy_lines.append("COPY package.json ./")
@@ -251,8 +497,12 @@ def _repair_dockerfile_output(
             fixed = new_fixed
             changed = True
 
-        install_pattern = r"(?im)corepack\s+enable\s+pnpm\s*&&\s*pnpm\s+i\s+--frozen-lockfile"
-        new_fixed = re.sub(install_pattern, f"corepack enable pnpm && pnpm i --frozen-lockfile --filter ./{build_ctx}...", fixed)
+        filter_target = service_subpath or build_ctx
+        install_pattern = r"(?im)corepack\s+enable\s+pnpm\s*&&\s*pnpm\s+i\s+--frozen-lockfile(?:\s+--filter\s+\./[^\s]+)*"
+        replacement = "corepack enable pnpm && pnpm i --frozen-lockfile"
+        if filter_target and filter_target != ".":
+            replacement += f" --filter ./{filter_target}..."
+        new_fixed = re.sub(install_pattern, replacement, fixed)
         if new_fixed != fixed:
             fixed = new_fixed
             changed = True
@@ -370,6 +620,38 @@ def _repair_dockerfile_output(
         fixed = new_fixed
         changed = True
 
+    # Hard guard: never keep malformed current-dir pnpm filters.
+    new_fixed = re.sub(r"(?im)\s+--filter\s+\./\.\.\.\.", "", fixed)
+    if new_fixed != fixed:
+        fixed = new_fixed
+        changed = True
+
+    # Collapse duplicate identical pnpm filter flags anywhere in the file.
+    new_fixed = re.sub(
+        r"(?im)(--filter\s+\./[^\s]+\.\.\.)(?:\s+\1)+",
+        r"\1",
+        fixed,
+    )
+    if new_fixed != fixed:
+        fixed = new_fixed
+        changed = True
+    new_fixed = re.sub(r"(?im)\s+--filter\s+\./\.\.\.", "", fixed)
+    if new_fixed != fixed:
+        fixed = new_fixed
+        changed = True
+
+    # Ensure runner workdir is service path for nested monorepo Dockerfiles.
+    if service_subpath and "FROM base AS runner" in fixed and f"WORKDIR /app/{service_subpath}" not in fixed:
+        new_fixed = re.sub(
+            r"(?im)^(\s*FROM\s+base\s+AS\s+runner\s*$)",
+            rf"\1\nWORKDIR /app/{service_subpath}",
+            fixed,
+            count=1,
+        )
+        if new_fixed != fixed:
+            fixed = new_fixed
+            changed = True
+
     # Normalize shell-form node CMD to JSON exec form for better signal handling.
     cmd_match = re.search(r"(?im)^\s*CMD\s+node\s+([^\n]+?)\s*$", fixed)
     if cmd_match:
@@ -381,9 +663,33 @@ def _repair_dockerfile_output(
                 fixed,
                 count=1,
             )
-            if new_fixed != fixed:
-                fixed = new_fixed
-                changed = True
+        if new_fixed != fixed:
+            fixed = new_fixed
+            changed = True
+
+    # Ensure runtime files are writable for non-root app user.
+    if re.search(r"(?im)^\s*USER\s+app\s*$", fixed):
+        # If runtime command uses pnpm, ensure pnpm is enabled in runner stage too.
+        uses_pnpm_cmd = bool(re.search(r'(?im)^\s*CMD\s+\[\s*"pnpm"\s*,', fixed))
+        has_runner_corepack = bool(re.search(r"(?im)^\s*RUN\s+corepack\s+enable\s+pnpm\s*$", fixed))
+        if uses_pnpm_cmd and not has_runner_corepack:
+            user_match = re.search(r"(?im)^\s*USER\s+app\s*$", fixed)
+            if user_match:
+                insert_at = user_match.start()
+                new_fixed = fixed[:insert_at] + "RUN corepack enable pnpm\n" + fixed[insert_at:]
+                if new_fixed != fixed:
+                    fixed = new_fixed
+                    changed = True
+
+        has_chown = bool(re.search(r"(?im)^\s*RUN\s+chown\s+-R\s+app:app\s+/app\s*$", fixed))
+        if not has_chown:
+            user_match = re.search(r"(?im)^\s*USER\s+app\s*$", fixed)
+            if user_match:
+                insert_at = user_match.start()
+                new_fixed = fixed[:insert_at] + "RUN chown -R app:app /app\n" + fixed[insert_at:]
+                if new_fixed != fixed:
+                    fixed = new_fixed
+                    changed = True
 
     # Prefer npm/pnpm script entrypoint for backend services when `start` exists.
     service_name = str(service.get("name", "")).strip().lower()
@@ -409,28 +715,168 @@ def _repair_dockerfile_output(
             fixed = new_fixed
             changed = True
 
+    # Final guard: remove COPY sources that cannot exist under this build context.
+    if isinstance(key_files, dict):
+        known_files = {_normalize_ctx(str(p)) for p in key_files.keys()}
+        known_dirs = {
+            _normalize_ctx(str(p).split("/", 1)[0]) if "/" in str(p) else _normalize_ctx(str(p))
+            for p in key_files.keys()
+        }
+        valid_lines: list[str] = []
+        for line in fixed.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("copy ") and "--from=" not in stripped.lower():
+                parts = re.split(r"\s+", stripped[5:].strip())
+                src = ""
+                if parts and not parts[0].startswith("--") and len(parts) >= 2:
+                    src = parts[0]
+                if src:
+                    src_norm = _normalize_ctx(src.strip('"').strip("'"))
+                    candidate = _normalize_ctx(f"{build_ctx}/{src_norm}") if build_ctx != "." else src_norm
+                    if src_norm != "." and src_norm != "" and candidate not in known_files:
+                        if not any(k.startswith(candidate + "/") for k in known_files | known_dirs):
+                            changed = True
+                            continue
+            valid_lines.append(line)
+        fixed = "\n".join(valid_lines).strip() + "\n"
+
     return fixed if changed else content
 
 
-def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def _service_subpath(service: dict[str, Any]) -> str:
+    build_ctx_norm = _normalize_ctx(service.get("build_context", ".") or ".")
+    dockerfile_path_norm = _normalize_ctx(service.get("dockerfile_path", "") or "")
+    if (
+        build_ctx_norm == "."
+        and dockerfile_path_norm not in ("", ".", "Dockerfile")
+        and dockerfile_path_norm.endswith("/Dockerfile")
+    ):
+        return dockerfile_path_norm[: -len("/Dockerfile")]
+    return ""
+
+
+def _inject_command_hints_into_template(
+    dockerfile_content: str,
+    service: dict[str, Any],
+    command_hints: dict[str, str] | None,
+    available_scripts: list[str] | None = None,
+) -> str:
+    """Inject commands_gen install/build/run hints into a matched template Dockerfile."""
+    if not dockerfile_content.strip():
+        return dockerfile_content
+
+    hints = command_hints or {}
+    install_cmd = str(hints.get("install", "") or "").strip()
+    build_cmd = str(hints.get("build", "") or "").strip()
+    run_cmd = str(hints.get("run", "") or "").strip()
+    subpath = _service_subpath(service)
+
+    if install_cmd.startswith("#"):
+        install_cmd = ""
+    if build_cmd.startswith("#"):
+        build_cmd = ""
+    if run_cmd.startswith("#"):
+        run_cmd = ""
+
+    lower_template = dockerfile_content.lower()
+    template_uses_pnpm = ("pnpm-lock.yaml" in lower_template) or ("pnpm i" in lower_template) or ('"pnpm"' in lower_template)
+
+    # Do not let generic npm hints downgrade pnpm-focused templates.
+    if template_uses_pnpm:
+        if install_cmd and "pnpm" not in install_cmd:
+            install_cmd = ""
+        if build_cmd and ("pnpm" not in build_cmd and "turbo" not in build_cmd):
+            build_cmd = ""
+        if run_cmd and "pnpm" not in run_cmd:
+            run_cmd = ""
+
+    if install_cmd and "pnpm install" in install_cmd:
+        install_cmd = install_cmd.replace("pnpm install", "pnpm i")
+    if install_cmd and "pnpm i --frozen-lockfile" in install_cmd and subpath and "--filter" not in install_cmd:
+        install_cmd = f"{install_cmd} --filter ./{subpath}..."
+    # Guard against malformed filter suffixes.
+    install_cmd = install_cmd.replace("--filter ./....", "").strip()
+
+    updated = dockerfile_content
+    if install_cmd:
+        updated = re.sub(
+            r"(?im)^\s*RUN\s+corepack\s+enable\s+pnpm\s*&&\s*pnpm\s+i[^\n]*$",
+            f"RUN corepack enable pnpm && {install_cmd}",
+            updated,
+            count=1,
+        )
+        updated = re.sub(
+            r"(?im)^\s*RUN\s+pnpm\s+i[^\n]*$",
+            f"RUN {install_cmd}",
+            updated,
+            count=1,
+        )
+
+    if build_cmd:
+        updated = re.sub(
+            r"(?im)^\s*RUN\s+(?:pnpm|npm|yarn)\s+(?:run\s+)?build[^\n]*$",
+            f"RUN {build_cmd}",
+            updated,
+            count=1,
+        )
+
+    if run_cmd:
+        # Avoid dev server defaults in production Dockerfiles.
+        if any(token in run_cmd.lower() for token in (" dev", " run dev", "vite dev")):
+            if available_scripts:
+                scripts = {str(s).strip().lower() for s in available_scripts}
+                # Priority: start script is the universal production entrypoint
+                if "start" in scripts:
+                    run_cmd = "pnpm start"
+                # Vite-specific fallbacks only if no start script
+                elif "vite" in lower_template and "vite" in scripts:
+                    run_cmd = "pnpm vite"
+                elif "vite" in lower_template and "preview" in scripts:
+                    port = service.get("port", 5173)
+                    run_cmd = f'pnpm preview --host 0.0.0.0 --port {int(port)}'
+                else:
+                    run_cmd = ""
+            else:
+                run_cmd = ""
+    
+    if run_cmd:
+        run_parts = [part for part in run_cmd.split(" ") if part]
+        if run_parts:
+            run_json = "CMD [" + ", ".join(f'"{part}"' for part in run_parts) + "]"
+            updated = re.sub(r"(?im)^\s*CMD\s+[^\n]+$", run_json, updated, count=1)
+
+    # Ensure runner stage has a concrete workdir for monorepo subpath services.
+    if subpath and "FROM base AS runner" in updated and f"WORKDIR /app/{subpath}" not in updated:
+        updated = re.sub(
+            r"(?im)^(\s*FROM\s+base\s+AS\s+runner\s*$)",
+            rf"\1\nWORKDIR /app/{subpath}",
+            updated,
+            count=1,
+        )
+
+    return updated
+
+
+def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate production Dockerfiles for each service."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
     scan_dirs = scan.get("dirs", []) if isinstance(scan, dict) else []
     services = state.get("services", [])
-    commands = state.get("commands", {}) if isinstance(state.get("commands", {}), dict) else {}
-    command_map = commands.get("by_service", {}) if isinstance(commands, dict) else {}
+    command_hints_state = state.get("command_hints", {}) if isinstance(state.get("command_hints", {}), dict) else {}
+    command_map = command_hints_state.get("by_service", {}) if isinstance(command_hints_state, dict) else {}
     
     dockerfiles = {}
     warnings = state.get("docker_generation_warnings", [])
+    llm_outputs = state.get("llm_outputs", {})
+    if not isinstance(llm_outputs, dict):
+        llm_outputs = {}
     if not isinstance(warnings, list):
         warnings = []
     
     for service in services:
         original_ctx = service.get("build_context", ".")
         dockerfile_path = service.get("dockerfile_path", "")
-        if original_ctx == "." and dockerfile_path and "/" in dockerfile_path:
-            service["build_context"] = "/".join(dockerfile_path.split("/")[:-1])
             
         svc_name = service["name"]
         build_ctx = service["build_context"]
@@ -440,18 +886,6 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
         command_hints = command_map.get(svc_name, {}) if isinstance(command_map, dict) else {}
         if not isinstance(command_hints, dict):
             command_hints = {}
-        scripts_hint = (
-            f"Detected package.json scripts for this service: {', '.join(available_scripts)}"
-            if available_scripts
-            else "Detected package.json scripts for this service: none/unknown"
-        )
-        commands_hint = (
-            "Command hints from commands_gen:\n"
-            f"- install: {command_hints.get('install', 'n/a')}\n"
-            f"- build: {command_hints.get('build', 'n/a')}\n"
-            f"- run: {command_hints.get('run', 'n/a')}"
-        )
-        
         # Look up the pre-existing Dockerfile using the planner-provided path
         existing_dockerfile = None
         if dockerfile_path:
@@ -461,7 +895,6 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
         # 1. Try matching a Supabase template
         # 2. Fall back to deterministic builder
         # 3. Fall back to existing Dockerfile from repo
-        template_used = False
         stack_tokens = list(state.get("stack_tokens", []))
         
         # Build signals for template matching — infer from key_files evidence
@@ -505,6 +938,8 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
             "is_monorepo": is_monorepo,
             "has_turbo": has_turbo,
             "has_standalone": has_standalone,
+            "service_path": _service_subpath(service) or _normalize_ctx(build_ctx),
+            "package_path": _normalize_ctx(state.get("package_path", ".") or "."),
         }
         
         print(f"[docker_gen] Matching template for {svc_name}: tokens={stack_tokens}, signals={template_signals}")
@@ -514,10 +949,22 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
             template_vars = dict(matched.get("variables", {}))
             # Override with actual service values
             template_vars["port"] = port
-            template_vars["service_path"] = build_ctx if build_ctx != "." else template_vars.get("service_path", ".")
+            service_subpath = ""
+            if isinstance(dockerfile_path, str) and dockerfile_path.endswith("/Dockerfile"):
+                service_subpath = dockerfile_path[: -len("/Dockerfile")]
+            template_vars["service_path"] = (
+                service_subpath
+                if service_subpath
+                else (build_ctx if build_ctx != "." else template_vars.get("service_path", "."))
+            )
             
             baseline_dockerfile = fill_template(matched["template_content"], template_vars)
-            template_used = True
+            baseline_dockerfile = _inject_command_hints_into_template(
+                baseline_dockerfile,
+                service=service,
+                command_hints=command_hints,
+                available_scripts=available_scripts,
+            )
             print(f"[docker_gen] Template matched: {matched.get('name', 'unknown')} for {svc_name}")
         elif isinstance(existing_dockerfile, str) and existing_dockerfile.strip():
             baseline_dockerfile = existing_dockerfile
@@ -541,75 +988,12 @@ def dockerfile_generator_node(state: Dict[str, Any], config: RunnableConfig = No
             available_scripts=available_scripts,
         )
 
-        # ─── Use the baseline directly as the final Dockerfile ─────────────
-        # The LLM is only asked to verify, not to rewrite.
+        service["build_context"] = original_ctx
         dockerfiles[dockerfile_key] = baseline_dockerfile
-
-        # ─── LLM Verification (advisory only, does not replace content) ───
-        verify_prompt = f"""
-You are a DevOps expert reviewing a Dockerfile for production deployment.
-Do NOT output a new Dockerfile. Only check for issues.
-
-Service: {svc_name}
-Build context: {build_ctx}
-Port: {port}
-Stack: {state.get('detected_stack', 'unknown')}
-{scripts_hint}
-{commands_hint}
-{'Template used: ' + matched.get('name', 'unknown') if template_used and matched else 'Generated deterministically'}
-
-Dockerfile to verify:
-{baseline_dockerfile}
-
-{('EXISTING Dockerfile (from repository) for reference:' + chr(10) + existing_dockerfile) if existing_dockerfile else ''}
-
-Respond with ONLY a JSON object:
-- "verdict": "pass" if the Dockerfile looks correct, "fail" if there are critical issues
-- "issues": a list of strings describing each issue (empty list if verdict is "pass")
-
-Example: {{"verdict": "pass", "issues": []}}
-Example: {{"verdict": "fail", "issues": ["Wrong port exposed", "Missing build step"]}}
-"""
-
-        try:
-            response, _, _ = invoke_with_retry(
-                invoke_fn=lambda raw_prompt: llm_docker.invoke(raw_prompt, config=config),
-                prompt=verify_prompt,
-                fallback_prompt=FALLBACK_PROMPTS["docker"],
-                config=RETRY_CONFIGS["docker"],
-                node_name=f"docker_verify:{svc_name}",
-            )
-            verify_text = strip_markdown_wrapper(response.content).strip()
-            try:
-                verdict = json.loads(verify_text)
-            except (json.JSONDecodeError, TypeError):
-                # Try to recover if the model wrapped JSON in extra text or formatting.
-                try:
-                    import re
-                    match = re.search(r"\{.*\}", verify_text, re.DOTALL)
-                    if match:
-                        verdict = json.loads(match.group(0))
-                    else:
-                        raise json.JSONDecodeError("no JSON object could be decoded", verify_text, 0)
-                except Exception:
-                    warnings.append(f"llm_verify_unparsed:{svc_name}")
-                    print(f"[docker_verify] {svc_name}: Could not parse LLM verification response")
-                    verdict = None
-
-            if isinstance(verdict, dict):
-                if verdict.get("verdict") == "fail":
-                    issues = verdict.get("issues", [])
-                    for issue in issues:
-                        warnings.append(f"llm_verify:{svc_name}:{issue}")
-                    print(f"[docker_verify] {svc_name}: FAIL — {issues}")
-                else:
-                    print(f"[docker_verify] {svc_name}: PASS")
-        except Exception as e:
-            warnings.append(f"llm_verify_failed:{svc_name}:{e}")
-        finally:
-            service["build_context"] = original_ctx
     
     state["dockerfiles"] = dockerfiles
+    llm_outputs.pop("dockerfile_plan", None)
+    state["llm_outputs"] = llm_outputs
     if warnings:
         state["docker_generation_warnings"] = warnings
     return state

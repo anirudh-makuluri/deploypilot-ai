@@ -1,11 +1,7 @@
 from typing import Dict, Any
-import json
 import re
 import yaml
 from langchain_core.runnables.config import RunnableConfig
-from .llm_config import llm_compose, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
-from graph.llm_retry import invoke_with_retry
-from tools.example_bank import fetch_reference_examples, format_examples_for_prompt
 
 
 def _normalize_path(path: str) -> str:
@@ -36,7 +32,8 @@ def _build_deterministic_compose(services: list[dict[str, Any]]) -> str:
         build_context = str(svc.get("build_context", ".") or ".")
         dockerfile_path = _normalize_dockerfile_path(str(svc.get("dockerfile_path", "") or ""))
         try:
-            port_int = int(svc.get("port")) if svc.get("port") is not None else None
+            port = svc.get("port")
+            port_int = int(port) if port is not None else None
         except (TypeError, ValueError):
             port_int = None
 
@@ -189,8 +186,9 @@ def _strip_next_public_env(entry: dict[str, Any]) -> bool:
             entry["environment"] = filtered
     elif isinstance(env, dict):
         to_delete = [key for key in env.keys() if str(key).startswith("NEXT_PUBLIC_")]
-        for key in to_delete:
-            env.pop(key, None)
+        if to_delete:
+            for key in to_delete:
+                env.pop(key, None)
             changed = True
 
     return changed
@@ -248,7 +246,7 @@ def _strip_dev_bind_mounts(entry: dict[str, Any]) -> bool:
             if source.startswith("./") or source.startswith("../"):
                 changed = True
                 continue
-        if isinstance(volume, dict):
+        elif isinstance(volume, dict):
             vol_type = str(volume.get("type", "")).strip().lower()
             source = str(volume.get("source", "")).strip()
             if vol_type == "bind" or source.startswith("./") or source.startswith("../"):
@@ -451,7 +449,8 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
                 continue
 
             try:
-                expected_port = int(expected.get("port")) if expected.get("port") is not None else None
+                port_value = expected.get("port")
+                expected_port = int(port_value) if port_value is not None else None
             except (TypeError, ValueError):
                 expected_port = None
 
@@ -475,8 +474,8 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
         changed = True
 
     # If dependency services are removed, remove orphaned named volumes.
-    if isinstance(parsed.get("volumes"), dict):
-        volume_map = parsed.get("volumes")
+    volumes_block = parsed.get("volumes")
+    if isinstance(volumes_block, dict):
         used_named_volumes: set[str] = set()
         for entry in services_block.values():
             if not isinstance(entry, dict):
@@ -495,9 +494,9 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
                         if source:
                             used_named_volumes.add(source)
 
-        for volume_name in list(volume_map.keys()):
+        for volume_name in list(volumes_block.keys()):
             if volume_name not in used_named_volumes:
-                volume_map.pop(volume_name, None)
+                volumes_block.pop(volume_name, None)
                 changed = True
 
     # Add explicit network configuration for clearer service isolation.
@@ -522,121 +521,25 @@ def _repair_compose_output(content: str, services: list[dict[str, Any]], scan: d
     return yaml.safe_dump(parsed, sort_keys=False)
 
 
-def compose_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def compose_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate a docker-compose.yml for all services."""
     scan = state.get("repo_scan", {})
-    key_files = scan.get("key_files", {})
+    key_files = scan.get("key_files", {}) if isinstance(scan, dict) else {}
+    if not isinstance(key_files, dict):
+        key_files = {}
     services = state.get("services", [])
+    if not isinstance(services, list):
+        services = []
     
     # Check for existing docker-compose
     existing_compose = None
     for path, content in key_files.items():
-        filename = path.split("/")[-1]
+        filename = str(path).split("/")[-1]
         if filename in ("docker-compose.yml", "docker-compose.yaml"):
             existing_compose = content
             break
     
-    services_desc = "\n".join([
-        (
-            f"  - {s['name']}: build context={s['build_context']}, "
-            f"dockerfile={s.get('dockerfile_path') or 'Dockerfile'}, port={s['port']}"
-        )
-        for s in services
-    ])
-
-    examples = fetch_reference_examples(
-        artifact_type="compose",
-        detected_stack=state.get("detected_stack", "unknown"),
-        stack_tokens=state.get("stack_tokens", []),
-        service=None,
-        limit=3,
-    )
-    references = format_examples_for_prompt(examples)
-    
     baseline_compose = existing_compose if isinstance(existing_compose, str) and existing_compose.strip() else _build_deterministic_compose(services)
     baseline_compose = _repair_compose_output(baseline_compose, services, scan)
-
-    if existing_compose:
-        prompt = f"""
-You are a DevOps expert refining a deterministic baseline docker-compose.yml.
-
-Services in this repo:
-{services_desc}
-
-Stack: {state.get('detected_stack', 'unknown')}
-
-DETERMINISTIC BASELINE docker-compose.yml:
-{baseline_compose}
-
-EXISTING docker-compose.yml:
-{existing_compose}
-
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
-
-Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
-
-Rules:
-- Each app service should build from its respective directory with the correct Dockerfile.
-- For pnpm monorepos with a root lockfile, prefer `build.context: .` and service Dockerfiles like `apps/backend/Dockerfile`.
-- If two services use the same Dockerfile filename (for example both are named Dockerfile), keep them as separate services when build contexts differ.
-- Every declared app service must define a ports mapping list (for example: "3000:3000").
-- Avoid dev-only bind mounts for app code in production compose output.
-- `NEXT_PUBLIC_BACKEND_URL` must be externally configurable (for example `${{NEXT_PUBLIC_BACKEND_URL}}`), not internal Docker DNS like `http://backend:5000`.
-- Add external services (postgres, redis, etc.) if the codebase references them but they're missing.
-- Use environment variables for credentials (with placeholder values).
-- Output ONLY YAML, no markdown wrappers.
-- Do NOT include any explanations, analysis, or commentary. Return ONLY the raw YAML content.
-- Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
-"""
-    else:
-        prompt = f"""
-    You are a DevOps expert refining a deterministic baseline docker-compose.yml.
-
-Services to include:
-{services_desc}
-
-Stack: {state.get('detected_stack', 'unknown')}
-Repo scan: {json.dumps(scan, indent=2)}
-
-DETERMINISTIC BASELINE docker-compose.yml:
-{baseline_compose}
-
-REFERENCE EXAMPLES (adapt style/patterns, do not copy verbatim):
-{references}
-
-Improve the baseline compose file using these rules:
-- Each app service should build from its respective build context directory with the correct Dockerfile.
-- For pnpm monorepos with a root lockfile, prefer `build.context: .` and service Dockerfiles like `apps/backend/Dockerfile`.
-- If two services use the same Dockerfile filename (for example both are named Dockerfile), keep them as separate services when build contexts differ.
-- Every declared app service must define a ports mapping list (for example: "3000:3000").
-- Avoid dev-only bind mounts for app code in production compose output.
-- `NEXT_PUBLIC_BACKEND_URL` must be externally configurable (for example `${{NEXT_PUBLIC_BACKEND_URL}}`), not internal Docker DNS like `http://backend:5000`.
-- Infer any external services needed (postgres, redis, etc.) from the codebase and add them.
-- Use environment variables for credentials (with placeholder values).
-- Use volumes for data persistence.
-- Output ONLY YAML, no markdown wrappers.
-- Do NOT include any explanations, analysis, or commentary. Return ONLY the raw YAML content.
-- Reuse useful patterns from REFERENCE EXAMPLES where applicable, but do not copy exact text.
-"""
-
-    try:
-        response, attempts_used, fallback_used = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_compose.invoke(raw_prompt, config=config),
-            prompt=prompt,
-            fallback_prompt=FALLBACK_PROMPTS["compose"],
-            config=RETRY_CONFIGS["compose"],
-            node_name="compose_gen",
-        )
-        compose = strip_markdown_wrapper(response.content, lang="yaml")
-        compose = _repair_compose_output(compose, services, scan)
-        state["docker_compose"] = compose
-        state["compose_retry_attempts"] = attempts_used
-        state["compose_fallback_used"] = fallback_used
-    except Exception as e:
-        state["docker_compose"] = baseline_compose
-        state["compose_retry_attempts"] = RETRY_CONFIGS["compose"].max_attempts
-        state["compose_fallback_used"] = True
-        state["compose_generation_warning"] = f"llm_refine_failed:{e}"
-    
+    state["docker_compose"] = baseline_compose
     return state

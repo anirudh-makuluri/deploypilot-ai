@@ -27,6 +27,104 @@ def _get_dockerfile_path(build_context: str) -> str:
     return f"{normalized}/Dockerfile"
 
 
+def _service_requires_compose_networking(service: Dict[str, Any]) -> bool:
+    """Return True when a single service still benefits from compose networking.
+
+    This applies to monorepo-root builds that target a nested dockerfile path
+    (e.g. build_context='.' + dockerfile_path='apps/dashboard/Dockerfile').
+    """
+    if not isinstance(service, dict):
+        return False
+    build_ctx = _normalize_package_path(str(service.get("build_context", ".") or "."))
+    dockerfile_path = str(service.get("dockerfile_path", "") or "").replace("\\", "/").strip()
+    return build_ctx == "." and "/" in dockerfile_path
+
+
+def _hydrate_root_workspace_signals(
+    scan: Dict[str, Any],
+    *,
+    repo_url: str,
+    github_token: str | None,
+    max_files: int,
+    package_path: str,
+) -> Dict[str, Any]:
+    """For scoped package analysis, merge root workspace manifests into scan context."""
+    if _normalize_package_path(package_path) == ".":
+        return scan
+    if not isinstance(scan, dict):
+        return scan
+
+    key_files = scan.get("key_files", {})
+    if not isinstance(key_files, dict):
+        key_files = {}
+
+    # If scoped scan already has explicit workspace markers, avoid extra GitHub call.
+    # Do not treat a plain `package.json` as sufficient here because in scoped mode
+    # it can belong to the package itself (not the repo root workspace).
+    workspace_markers = (
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "turbo.yaml",
+        "nx.json",
+        "lerna.json",
+    )
+    if any(name in key_files for name in workspace_markers):
+        return scan
+
+    try:
+        root_scan = fetch_repo_structure.invoke(
+            {
+                "repo_url": repo_url,
+                "github_token": github_token,
+                "max_files": max(max_files, 200),
+                "package_path": ".",
+            }
+        )
+    except Exception as e:
+        print(f"Workspace signal hydration failed: {e}")
+        return scan
+
+    if not isinstance(root_scan, dict) or root_scan.get("error"):
+        return scan
+
+    root_key_files = root_scan.get("key_files", {})
+    if not isinstance(root_key_files, dict):
+        root_key_files = {}
+
+    merged = dict(scan)
+    merged_key_files = dict(key_files)
+    for filename in ("package.json", *workspace_markers):
+        value = root_key_files.get(filename)
+        if isinstance(value, str) and value.strip():
+            merged_key_files.setdefault(filename, value)
+    merged["key_files"] = merged_key_files
+
+    # Preserve top-level directory hints used by downstream monorepo heuristics.
+    scoped_dirs = scan.get("dirs", []) if isinstance(scan.get("dirs", []), list) else []
+    root_dirs = root_scan.get("dirs", []) if isinstance(root_scan.get("dirs", []), list) else []
+    if root_dirs:
+        merged_dirs = set(str(d) for d in scoped_dirs)
+        for d in root_dirs:
+            d_str = str(d).strip()
+            if "/" not in d_str and d_str:
+                merged_dirs.add(d_str)
+        merged["dirs"] = sorted(merged_dirs)
+
+    # Pass explicit root-workspace hints for planner logic in scoped mode.
+    merged["_root_workspace_detected"] = any(name in root_key_files for name in workspace_markers)
+    sub_packages: list[str] = []
+    for file_path in root_key_files.keys():
+        norm = _normalize_package_path(str(file_path))
+        if norm.endswith("/package.json"):
+            parent = norm[: -len("/package.json")]
+            if parent and "/" in parent:
+                sub_packages.append(parent)
+    merged["_root_workspace_sub_packages"] = sorted(set(sub_packages))
+
+    return merged
+
+
 def _path_is_within(service_path: str, package_path: str) -> bool:
     """Return True when service_path is package_path or a descendant of it."""
     service_norm = _normalize_package_path(service_path)
@@ -79,12 +177,14 @@ def _filter_cached_response_for_package(cached: Dict[str, Any], package_path: st
         if path in dockerfile_paths
     } if isinstance(hadolint_results, dict) else {}
 
+    keep_compose = len(filtered_services) == 1 and _service_requires_compose_networking(filtered_services[0])
     projected = dict(cached)
     projected["services"] = filtered_services
     projected["dockerfiles"] = filtered_dockerfiles
     projected["hadolint_results"] = filtered_hadolint
-    projected["docker_compose"] = None
-    projected["nginx_conf"] = None
+    if not keep_compose:
+        projected["docker_compose"] = None
+        projected["nginx_conf"] = None
     projected["_cache_package_path"] = package_norm
     return projected
 
@@ -236,27 +336,43 @@ def _filter_cached_response_for_service(cached: Dict[str, Any], service_name: st
         if isinstance(hadolint_results, dict) and path in dockerfile_paths
     } if isinstance(hadolint_results, dict) else {}
 
+    keep_compose = _service_requires_compose_networking(selected_service) or bool(cached.get("docker_compose"))
     projected = dict(cached)
     projected["services"] = [selected_service]
     projected["dockerfiles"] = filtered_dockerfiles
     projected["hadolint_results"] = filtered_hadolint
-    projected["docker_compose"] = None
-    projected["nginx_conf"] = None
+    if not keep_compose:
+        projected["docker_compose"] = None
+        projected["nginx_conf"] = None
     return projected
 
 def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Calls GitHub tool directly to populate repo_scan. Also checks cache."""
-    scan = fetch_repo_structure.invoke({
-        "repo_url": state["repo_url"],
-        "github_token": state.get("github_token"),
-        "max_files": state.get("max_files", 50),
-        "package_path": state.get("package_path", ".")
-    })
+    repo_url = state["repo_url"]
+    github_token = state.get("github_token")
+    max_files = int(state.get("max_files", 50) or 50)
+    package_path = state.get("package_path", ".")
+    scan = fetch_repo_structure.invoke(
+        {
+            "repo_url": repo_url,
+            "github_token": github_token,
+            "max_files": max_files,
+            "package_path": package_path,
+        }
+    )
     
     if "error" in scan:
         state["error"] = scan["error"]
         return state
         
+    scan = _hydrate_root_workspace_signals(
+        scan,
+        repo_url=repo_url,
+        github_token=github_token,
+        max_files=max_files,
+        package_path=package_path,
+    )
+
     commit_sha = scan.get("commit_sha", "unknown")
     state["commit_sha"] = commit_sha
     requested_package_path = _normalize_package_path(state.get("package_path", "."))
@@ -310,4 +426,3 @@ def scanner_node(state: Dict[str, Any]) -> Dict[str, Any]:
     
     state["repo_scan"] = scan
     return state
-

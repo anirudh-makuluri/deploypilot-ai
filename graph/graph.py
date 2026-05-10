@@ -1,5 +1,6 @@
 from langgraph.graph import StateGraph, END
-from typing import Dict, Any
+from langchain_core.runnables.config import RunnableConfig
+from typing import Dict, Any, TypedDict
 
 from .nodes import (
     scanner_node,
@@ -8,19 +9,73 @@ from .nodes import (
     commands_generator_node,
     compose_generator_node,
     nginx_generator_node,
-    verifier_node
+    verifier_node,
+    build_verify_node,
+    preflight_node,
 )
 
-# State is a plain dict
-workflow = StateGraph(dict)
 
-workflow.add_node("scanner", scanner_node)
-workflow.add_node("planner", planner_node)
-workflow.add_node("commands_gen", commands_generator_node)
-workflow.add_node("docker_gen", dockerfile_generator_node)
-workflow.add_node("compose_gen", compose_generator_node)
-workflow.add_node("nginx_gen", nginx_generator_node)
-workflow.add_node("verifier", verifier_node)
+class StateDict(TypedDict, total=False):
+    """State schema for the artifact generation workflow."""
+    error: str | None
+    cached_response: Dict[str, Any] | None
+    services: list | None
+    package_path: str
+    repo_url: str
+    github_token: str | None
+    repo_scan: Dict[str, Any]
+    scan_results: Dict[str, Any]
+    plan: Dict[str, Any]
+    commands: list | None
+    docker_generated: str | None
+    compose_generated: str | None
+    nginx_generated: str | None
+    verification_results: Dict[str, Any] | None
+    preflight_checks: Dict[str, Any] | None
+    final_output: Dict[str, Any] | None
+    commit_sha: str
+    stack_tokens: list
+    detected_stack: str
+    dockerfiles: Dict[str, str]
+    docker_compose: str
+    nginx_conf: str
+    max_files: int
+    service_name: str | None
+    build_verification: Dict[str, Any]
+    preflight_issues: list
+    risks: list
+    confidence: float
+    hadolint_results: Dict[str, Any]
+    llm_outputs: Dict[str, Any]
+    extraction_result: Dict[str, Any]
+
+
+workflow = StateGraph(StateDict)
+
+# Wrap nodes to handle RunnableConfig parameter properly
+def _wrap_node_with_config(node_func):
+    """Wrap node function to handle optional RunnableConfig parameter."""
+    def wrapper(state: StateDict, config: RunnableConfig | None = None) -> StateDict:  # type: ignore
+        if config is not None:
+            return node_func(state, config=config)  # type: ignore
+        return node_func(state)  # type: ignore
+    return wrapper
+
+def _wrap_node_simple(node_func):
+    """Wrap simple node function without config parameter."""
+    def wrapper(state: StateDict) -> StateDict:  # type: ignore
+        return node_func(state)  # type: ignore
+    return wrapper
+
+workflow.add_node("scanner", _wrap_node_simple(scanner_node))
+workflow.add_node("planner", _wrap_node_with_config(planner_node))
+workflow.add_node("commands_gen", _wrap_node_simple(commands_generator_node))
+workflow.add_node("docker_gen", _wrap_node_with_config(dockerfile_generator_node))
+workflow.add_node("compose_gen", _wrap_node_with_config(compose_generator_node))
+workflow.add_node("nginx_gen", _wrap_node_with_config(nginx_generator_node))
+workflow.add_node("build_verify", _wrap_node_simple(build_verify_node))
+workflow.add_node("preflight", _wrap_node_simple(preflight_node))
+workflow.add_node("verifier", _wrap_node_with_config(verifier_node))
 
 
 # ─── Conditional Edges ──────────────────────────────────────────────────────────
@@ -60,6 +115,16 @@ def check_compose_required(state: Dict[str, Any]) -> str:
     return "compose"
 
 
+def is_build_verify_enabled() -> bool:
+    import os
+    raw = os.getenv("SD_RAILPACK_VERIFY_ENABLED", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def check_build_verify_required(_state: Dict[str, Any]) -> str:
+    return "verify" if is_build_verify_enabled() else "skip"
+
+
 # Entry point
 workflow.set_entry_point("scanner")
 
@@ -83,7 +148,7 @@ workflow.add_conditional_edges(
     },
 )
 
-# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> verifier -> END
+# Flow: commands_gen -> docker_gen -> compose_gen (if needed) -> nginx_gen -> (optional build_verify) -> preflight -> verifier -> END
 workflow.add_edge("commands_gen", "docker_gen")
 workflow.add_conditional_edges(
     "docker_gen",
@@ -94,7 +159,16 @@ workflow.add_conditional_edges(
     },
 )
 workflow.add_edge("compose_gen", "nginx_gen")
-workflow.add_edge("nginx_gen", "verifier")
+workflow.add_conditional_edges(
+    "nginx_gen",
+    check_build_verify_required,
+    {
+        "verify": "build_verify",
+        "skip": "preflight",
+    },
+)
+workflow.add_edge("build_verify", "preflight")
+workflow.add_edge("preflight", "verifier")
 workflow.add_edge("verifier", END)
 
 graph = workflow.compile()

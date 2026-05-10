@@ -145,6 +145,10 @@ def _filter_risks(
                 continue
         if "consecutive run" in lowered and "dockerfile" in lowered:
             continue
+        if "duplicate filter" in lowered and "pnpm" in lowered:
+            continue
+        if "--filter ./apps/" in lowered and "duplicate" in lowered:
+            continue
 
         # Only require persistent volumes when stateful services are present.
         if (
@@ -170,7 +174,33 @@ def _filter_risks(
                 continue
 
         # Drop any risks focused on environment variable management; env var handling is left to deploy-time configuration.
-        if "environment variable" in lowered or "env var" in lowered or "environment variables" in lowered:
+        if (
+            ("environment variable" in lowered or "env var" in lowered or "environment variables" in lowered)
+            and "secret management" not in lowered
+            and "sensitive credentials" not in lowered
+        ):
+            continue
+
+        # Generic script-existence concerns are noisy when command selection is heuristic-driven.
+        if ("start script" in lowered or "script exists" in lowered) and ("package.json" in lowered or "pnpm start" in lowered):
+            continue
+
+        # Generic pnpm/workspace warnings without concrete failure evidence.
+        if "pnpm filter syntax" in lowered and any(token in lowered for token in ("ellipsis", "workspace", "dependencies")):
+            continue
+        if "pnpm version" in lowered and any(token in lowered for token in ("pin", "pinning", "corepack")):
+            continue
+
+        # Generic build-output uncertainty without concrete failing artifact evidence.
+        if "build stage does not verify" in lowered or ("unclear if" in lowered and "build output" in lowered):
+            continue
+
+        # Docker context size notes are advisory by default.
+        if ".dockerignore" in lowered and any(token in lowered for token in ("not referenced", "likely includes", "unnecessary files")):
+            continue
+
+        # Generic non-root permission warning without concrete permission failure.
+        if "non-root user" in lowered and "file permissions" in lowered:
             continue
 
         # Suppress websocket hardening warnings when required proxy headers are present.
@@ -185,6 +215,8 @@ def _filter_risks(
         # In smart-deploy's current flow nginx runs on host OS, so localhost upstreams are expected.
         if "nginx" in lowered and "localhost" in lowered and "container" in lowered and not compose_has_nginx_service:
             continue
+        if "nginx configuration proxies to" in lowered and "no docker-compose service definition exists" in lowered and not compose_has_nginx_service:
+            continue
 
         filtered.append(text)
 
@@ -197,6 +229,8 @@ def _compute_deterministic_confidence(
     docker_compose: str,
     nginx_conf: str,
     risks: List[str],
+    build_verification: Dict[str, Any] | None = None,
+    preflight_issues: List[str] | None = None,
     package_path: str = ".",
 ) -> float:
     """Compute confidence from final artifacts and filtered risks without LLM score dependence."""
@@ -215,7 +249,7 @@ def _compute_deterministic_confidence(
         if name and not isinstance(dockerfiles.get(name), str):
             missing_dockerfiles += 1
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 0)) if svc.get("port") is not None else 0
             if port <= 0:
                 missing_ports += 1
         except (TypeError, ValueError):
@@ -243,13 +277,24 @@ def _compute_deterministic_confidence(
         score -= 0.1
 
     # Final filtered risks directly reduce confidence.
-    score -= min(0.6, 0.12 * len(risks))
+    score -= min(0.45, 0.08 * len(risks))
+    if preflight_issues:
+        score -= min(0.45, 0.2 * len(preflight_issues))
+
+    # Railpack build verification has strong signal value for real-world buildability.
+    build_status = str((build_verification or {}).get("status", "")).strip().lower()
+    if build_status == "failed":
+        score -= 0.35
+    elif build_status == "error":
+        score -= 0.4
+    elif build_status == "unavailable":
+        score -= 0.1
 
     # Keep confidence in a practical range and stable for API consumers.
     bounded = max(0.1, min(0.99, score))
     return round(bounded, 2)
 
-def verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def verifier_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Review all generated artifacts and assign confidence + risks."""
     scan = state.get("repo_scan", {})
     services = state.get("services", [])
@@ -257,6 +302,8 @@ def verifier_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[
     docker_compose = state.get("docker_compose", "")
     nginx_conf = state.get("nginx_conf", "")
     package_path = state.get("package_path", ".")
+    build_verification = state.get("build_verification", {})
+    preflight_issues = [str(x) for x in state.get("preflight_issues", []) if str(x).strip()]
 
     hadolint_results = {}
     for service, content in dockerfiles.items():
@@ -284,6 +331,12 @@ GENERATED DOCKER-COMPOSE:
 
 GENERATED NGINX CONFIG:
 {nginx_conf}
+
+RAILPACK BUILD VERIFICATION:
+{json.dumps(build_verification, indent=2)}
+
+PREFLIGHT STATIC CHECK ISSUES:
+{json.dumps(preflight_issues, indent=2)}
 
 Review for:
 1. Port consistency — do Dockerfiles EXPOSE the same ports referenced in compose and nginx?
@@ -318,22 +371,37 @@ If everything looks good, confidence should be high (0.85+) with an empty or min
             nginx_conf,
             package_path=package_path,
         )
+        build_status = str(build_verification.get("status", "")).strip().lower()
+        if build_status in {"failed", "error"}:
+            filtered_risks.append(
+                f"Railpack build verification {build_status}: {build_verification.get('message', 'no message provided')}"
+            )
+        elif build_status == "unavailable":
+            filtered_risks.append("Railpack build verification unavailable on this host.")
+        filtered_risks.extend(preflight_issues)
         state["risks"] = filtered_risks
-        state["confidence"] = _compute_deterministic_confidence(
-            services=services,
-            dockerfiles=dockerfiles,
-            docker_compose=docker_compose,
-            nginx_conf=nginx_conf,
-            risks=filtered_risks,
-            package_path=package_path,
-        )
-        state["llm_confidence_raw"] = result.confidence
+        state["confidence"] = result.confidence 
         state["hadolint_results"] = hadolint_results
         state["verifier_retry_attempts"] = attempts_used
         state["verifier_fallback_used"] = fallback_used
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["verifier"] = {
+            "llm_confidence_raw": result.confidence,
+            "llm_risks_raw": result.risks,
+            "retry_attempts": attempts_used,
+            "fallback_used": fallback_used,
+        }
+        state["llm_outputs"] = llm_outputs
     except Exception as e:
         state["confidence"] = 0.5
         state["risks"] = [f"Verifier failed to run: {e}"]
         state["hadolint_results"] = hadolint_results
+        llm_outputs = state.get("llm_outputs", {})
+        if not isinstance(llm_outputs, dict):
+            llm_outputs = {}
+        llm_outputs["verifier"] = {"error": str(e)}
+        state["llm_outputs"] = llm_outputs
     
     return state

@@ -1,8 +1,6 @@
 from typing import Dict, Any
 import re
 from langchain_core.runnables.config import RunnableConfig
-from .llm_config import llm_nginx, strip_markdown_wrapper, RETRY_CONFIGS, FALLBACK_PROMPTS
-from graph.llm_retry import invoke_with_retry
 
 
 def _count_braces(content: str) -> tuple[int, int]:
@@ -133,7 +131,7 @@ def _infer_frontend_port(services: list[dict[str, Any]]) -> int:
         if not isinstance(svc, dict):
             continue
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 3000))
         except (TypeError, ValueError):
             continue
         if port == 3000:
@@ -145,6 +143,19 @@ def _infer_frontend_port(services: list[dict[str, Any]]) -> int:
         except (TypeError, ValueError):
             return 3000
     return 3000
+
+
+def _infer_frontend_service_name(services: list[dict[str, Any]]) -> str:
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        name = str(svc.get("name", "")).strip()
+        lowered = name.lower()
+        if any(token in lowered for token in ("web", "frontend", "ui", "client", "next", "dashboard")):
+            return name or "web"
+    if services and isinstance(services[0], dict):
+        return str(services[0].get("name", "")).strip() or "web"
+    return "web"
 
 
 def _infer_backend_port(services: list[dict[str, Any]]) -> int:
@@ -162,7 +173,7 @@ def _infer_backend_port(services: list[dict[str, Any]]) -> int:
         if not isinstance(svc, dict):
             continue
         try:
-            port = int(svc.get("port"))
+            port = int(svc.get("port", 5000))
         except (TypeError, ValueError):
             continue
         if port == 5000:
@@ -178,7 +189,8 @@ def _infer_backend_port(services: list[dict[str, Any]]) -> int:
 
 def _default_nginx_conf(services: list[dict[str, Any]]) -> str:
     frontend_port = _infer_frontend_port(services)
-    default_csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https: ws: wss:;"
+    frontend_service = _infer_frontend_service_name(services)
+    default_csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https: wss:;"
 
     return (
         "events { worker_connections 1024; }\n\n"
@@ -190,7 +202,7 @@ def _default_nginx_conf(services: list[dict[str, Any]]) -> str:
         "    add_header X-Frame-Options \"SAMEORIGIN\" always;\n"
         f"    add_header Content-Security-Policy \"{default_csp}\" always;\n\n"
         "    location / {\n"
-        f"      proxy_pass http://localhost:{frontend_port};\n"
+        f"      proxy_pass http://{frontend_service}:{frontend_port};\n"
         "      proxy_http_version 1.1;\n"
         "      proxy_set_header Host $host;\n"
         "      proxy_set_header X-Real-IP $remote_addr;\n"
@@ -238,19 +250,7 @@ def _repair_nginx_output(content: str, services: list[dict[str, Any]], include_w
     if not _is_balanced(repaired):
         return _default_nginx_conf(services)
 
-    # Smart-deploy currently uses host nginx, so upstreams should target localhost published ports.
-    frontend_port = _infer_frontend_port(services)
-    backend_port = _infer_backend_port(services)
-    repaired = re.sub(
-        rf"(?im)(proxy_pass\s+http://)(web|frontend|ui|client|next):{frontend_port}(\s*;)",
-        rf"\1localhost:{frontend_port}\3",
-        repaired,
-    )
-    repaired = re.sub(
-        rf"(?im)(proxy_pass\s+http://)(backend|api|server):{backend_port}(\s*;)",
-        rf"\1localhost:{backend_port}\3",
-        repaired,
-    )
+    # Preserve service DNS upstreams when present (compose networking).
 
     if not include_ws:
         repaired = _remove_ws_location_blocks(repaired)
@@ -274,7 +274,7 @@ def _infer_route_guidance(scan: Dict[str, Any], services: list[dict[str, Any]]) 
     )
 
 
-def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
     """Generate an nginx.conf for production deployment with multi-service routing."""
     scan = state.get("repo_scan", {})
     key_files = scan.get("key_files", {})
@@ -288,91 +288,9 @@ def nginx_generator_node(state: Dict[str, Any], config: RunnableConfig = None) -
             existing_nginx = content
             break
     
-    services_desc = "\n".join([
-        f"  - {s['name']}: port={s['port']}"
-        for s in services
-    ])
-    route_guidance = _infer_route_guidance(scan, services)
     _, _, include_ws = _infer_route_flags(scan, services)
     
     baseline_nginx = existing_nginx if isinstance(existing_nginx, str) and existing_nginx.strip() else _default_nginx_conf(services)
     baseline_nginx = _repair_nginx_output(baseline_nginx, services, include_ws=include_ws)
-
-    if existing_nginx:
-        prompt = f"""
-You are a DevOps expert refining a deterministic baseline nginx.conf.
-
-Services:
-{services_desc}
-
-{route_guidance}
-
-DETERMINISTIC BASELINE nginx.conf:
-{baseline_nginx}
-
-EXISTING nginx.conf:
-{existing_nginx}
-
-Improve the deterministic baseline while preserving correctness. If no improvements are needed, return the baseline as-is.
-
-Rules:
-- Listen on port 80.
-- Always include structurally complete config blocks with balanced braces.
-- Route traffic to each service appropriately.
-- Add `/api` only when repo evidence indicates backend routes use an `/api` prefix.
-- Add `/ws` only when websocket behavior is indicated.
-- Assume nginx runs on the host OS (outside compose), so use localhost upstreams (for example `proxy_pass http://localhost:3000`).
-- Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
-- Keep Content-Security-Policy practical for modern frontends (allow `unsafe-inline` for scripts/styles when needed).
-- Include proper proxy headers (X-Real-IP, X-Forwarded-For).
-- For WebSocket services, include proper upgrade headers.
-- Output ONLY nginx config, no markdown wrappers.
-"""
-    else:
-        prompt = f"""
-    You are a DevOps expert refining a deterministic baseline nginx.conf.
-
-Services:
-{services_desc}
-
-{route_guidance}
-
-DETERMINISTIC BASELINE nginx.conf:
-{baseline_nginx}
-
-Improve the baseline config using these rules:
-- Listen on port 80.
-- Always include structurally complete config blocks with balanced braces.
-- Route traffic to each service appropriately.
-- Add `/api` only when repo evidence indicates backend routes use an `/api` prefix.
-- Add `/ws` only when websocket behavior is indicated.
-- Assume nginx runs on the host OS (outside compose), so use localhost upstreams (for example `proxy_pass http://localhost:3000`).
-- Include ALL of these security headers: X-Frame-Options, X-Content-Type-Options, Content-Security-Policy.
-- Keep Content-Security-Policy practical for modern frontends (allow `unsafe-inline` for scripts/styles when needed).
-- Include proper proxy headers (X-Real-IP, X-Forwarded-For).
-- For WebSocket services, include proper upgrade headers (Connection, Upgrade).
-- Output ONLY nginx config, no markdown wrappers.
-"""
-
-    try:
-        response, attempts_used, fallback_used = invoke_with_retry(
-            invoke_fn=lambda raw_prompt: llm_nginx.invoke(raw_prompt, config=config),
-            prompt=prompt,
-            fallback_prompt=FALLBACK_PROMPTS["nginx"],
-            config=RETRY_CONFIGS["nginx"],
-            node_name="nginx_gen",
-        )
-        nginx_conf = strip_markdown_wrapper(response.content, lang="nginx")
-        if nginx_conf.startswith("conf\n"):
-            nginx_conf = nginx_conf[5:]
-        nginx_conf = _repair_nginx_output(nginx_conf, services, include_ws=include_ws)
-        state["nginx_conf"] = nginx_conf
-        state["nginx_retry_attempts"] = attempts_used
-        state["nginx_fallback_used"] = fallback_used
-    except Exception as e:
-        state["nginx_conf"] = baseline_nginx
-        state["nginx_retry_attempts"] = RETRY_CONFIGS["nginx"].max_attempts
-        state["nginx_fallback_used"] = True
-        state["nginx_generation_warning"] = f"llm_refine_failed:{e}"
-    
+    state["nginx_conf"] = baseline_nginx
     return state

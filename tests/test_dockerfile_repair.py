@@ -1,4 +1,5 @@
 from graph.nodes.dockerfile_generator import _repair_dockerfile_output
+from graph.nodes.dockerfile_generator import dockerfile_generator_node
 
 
 def test_repair_removes_healthcheck_instructions():
@@ -140,3 +141,130 @@ COPY --from=builder /app/apps/backend .
     assert "COPY --from=builder /app/node_modules ./node_modules" in repaired
     assert "RUN if [ -f package.json ] && grep -q '\"build\"' package.json; then" in repaired
     assert "\nFROM base AS builder\n" in repaired
+
+
+def test_generator_keeps_root_context_for_nested_dockerfile_and_emits_workspace_safe_commands():
+    state = {
+        "services": [
+            {
+                "name": "dashboard",
+                "build_context": ".",
+                "dockerfile_path": "apps/dashboard/Dockerfile",
+                "port": 5173,
+            }
+        ],
+        "stack_tokens": ["node", "vite", "pnpm"],
+        "repo_scan": {
+            "key_files": {
+                "package.json": "{}",
+                "pnpm-lock.yaml": "lock",
+                "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+                "apps/dashboard/package.json": '{"scripts":{"build":"vite build","start":"vite preview --host 0.0.0.0 --port 5173"}}',
+            }
+        },
+        "command_hints": {
+            "by_service": {
+                "dashboard": {
+                    "install": "pnpm install --frozen-lockfile",
+                    "build": "pnpm build",
+                    "run": "pnpm start",
+                }
+            }
+        },
+    }
+
+    out = dockerfile_generator_node(state)
+    dockerfile = out["dockerfiles"]["apps/dashboard/Dockerfile"]
+
+    assert "COPY pnpm-lock.yaml* ./" in dockerfile
+    assert "COPY pnpm-workspace.yaml* ./" in dockerfile
+    assert "COPY apps/dashboard/package.json apps/dashboard/package.json" in dockerfile
+    assert "pnpm i --frozen-lockfile --filter ./apps/dashboard..." in dockerfile
+    assert "--filter ./...." not in dockerfile
+    assert "RUN pnpm build" in dockerfile or "RUN pnpm --filter ./apps/dashboard... build" in dockerfile
+    assert "\nFROM base AS runner\nWORKDIR /app/apps/dashboard\n" in dockerfile
+    assert 'CMD ["pnpm", "start"]' in dockerfile
+
+
+def test_template_command_injection_does_not_downgrade_pnpm_to_npm_or_dev():
+    state = {
+        "services": [
+            {
+                "name": "dashboard",
+                "build_context": ".",
+                "dockerfile_path": "apps/dashboard/Dockerfile",
+                "port": 5173,
+            }
+        ],
+        "package_path": "apps/dashboard",
+        "stack_tokens": ["node", "react", "vite", "pnpm"],
+        "repo_scan": {
+            "key_files": {
+                "package.json": "{}",
+                "pnpm-lock.yaml": "lock",
+                "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+                "apps/dashboard/package.json": '{"scripts":{"build":"vite build","start":"vite preview --host 0.0.0.0 --port 5173","dev":"vite"}}',
+            }
+        },
+        # Simulate noisy/non-production hints from command generation.
+        "command_hints": {
+            "by_service": {
+                "dashboard": {
+                    "install": "npm ci",
+                    "build": "npm run build",
+                    "run": "npm run dev",
+                }
+            }
+        },
+    }
+
+    out = dockerfile_generator_node(state)
+    dockerfile = out["dockerfiles"]["apps/dashboard/Dockerfile"]
+
+    assert "RUN corepack enable pnpm && pnpm i --frozen-lockfile --filter ./apps/dashboard..." in dockerfile
+    assert dockerfile.count("--filter ./apps/dashboard...") == 1
+    assert "npm ci" not in dockerfile
+    assert "--filter ./...." not in dockerfile
+    assert 'CMD ["npm", "run", "dev"]' not in dockerfile
+    assert "WORKDIR /app/apps/dashboard" in dockerfile
+    assert 'CMD ["pnpm", "start"]' in dockerfile
+    # Vite monorepo template should drive filtered build command.
+    assert "RUN pnpm --filter ./apps/dashboard... build" in dockerfile
+
+
+def test_vite_template_falls_back_to_preview_when_start_script_missing():
+    state = {
+        "services": [
+            {
+                "name": "dashboard",
+                "build_context": ".",
+                "dockerfile_path": "apps/dashboard/Dockerfile",
+                "port": 5173,
+            }
+        ],
+        "package_path": "apps/dashboard",
+        "stack_tokens": ["node", "react", "vite", "pnpm"],
+        "repo_scan": {
+            "key_files": {
+                "package.json": "{}",
+                "pnpm-lock.yaml": "lock",
+                "pnpm-workspace.yaml": "packages:\n  - apps/*\n",
+                "apps/dashboard/package.json": '{"scripts":{"build":"vite build","preview":"vite preview"}}',
+            }
+        },
+        "command_hints": {
+            "by_service": {
+                "dashboard": {
+                    "install": "pnpm install --frozen-lockfile",
+                    "build": "pnpm run build",
+                    "run": "pnpm start",
+                }
+            }
+        },
+    }
+
+    out = dockerfile_generator_node(state)
+    dockerfile = out["dockerfiles"]["apps/dashboard/Dockerfile"]
+
+    assert 'CMD ["pnpm", "start"]' not in dockerfile
+    assert 'CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "5173"]' in dockerfile

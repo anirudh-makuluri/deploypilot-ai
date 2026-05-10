@@ -79,8 +79,8 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     services = state.get("services", [])
     stack_tokens = [str(t).lower() for t in state.get("stack_tokens", []) if isinstance(t, str)]
     token_set = set(stack_tokens)
-    scan = state.get("repo_scan", {}) if isinstance(state.get("repo_scan", {}), dict) else {}
-    key_files = scan.get("key_files", {}) if isinstance(scan, dict) else {}
+    scan = state.get("repo_scan", {})
+    key_files = scan.get("key_files", {})
 
     by_service: Dict[str, Dict[str, str]] = {}
 
@@ -91,8 +91,9 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not name:
             continue
 
-        build_ctx = str(service.get("build_context", ".") or ".")
+        build_ctx = _normalize_ctx(str(service.get("build_context", ".") or "."))
         dockerfile_path = str(service.get("dockerfile_path", "") or "").strip()
+        execution_root = _normalize_ctx(str(service.get("execution_root", ".") or "."))
         
         logical_ctx = build_ctx
         if build_ctx == "." and dockerfile_path and "/" in dockerfile_path:
@@ -111,24 +112,32 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if yarn_lock_path in key_files:
                 service_tokens.add("yarn")
 
-        try:
-            port = int(service.get("port")) if service.get("port") is not None else None
-        except (TypeError, ValueError):
-            port = None
+        port_value = service.get("port")
+        port = int(port_value) if port_value is not None else None
 
+        dockerfile_for_cmd = dockerfile_path or ("Dockerfile" if normalized_ctx == "." else f"{normalized_ctx}/Dockerfile")
         by_service[name] = {
             "install": _install_command(service_tokens, scripts),
             "build": _build_command(service_tokens, scripts),
             "run": _run_command(service_tokens, scripts, port),
+            "docker_build": f"docker build -f {dockerfile_for_cmd} {build_ctx}",
+            "execution_root": execution_root,
         }
 
     global_commands = []
+    global_with_execution_root: list[Dict[str, str]] = []
+    package_path = _normalize_ctx(str(state.get("package_path", ".") or "."))
+    compose_execution_root = package_path
     if isinstance(services, list) and len(services) > 1:
-        global_commands.extend([
+        compose_cmds = [
             "docker compose build",
             "docker compose up -d",
             "docker compose logs -f",
-        ])
+        ]
+        global_commands.extend(compose_cmds)
+        global_with_execution_root.extend(
+            [{"command": cmd, "execution_root": compose_execution_root} for cmd in compose_cmds]
+        )
     else:
         single = None
         if isinstance(services, list) and services and isinstance(services[0], dict):
@@ -137,17 +146,33 @@ def commands_generator_node(state: Dict[str, Any]) -> Dict[str, Any]:
             svc_name = str(single.get("name", "app") or "app")
             df_path = str(single.get("dockerfile_path", "")).strip()
             df_flag = f" -f {df_path}" if df_path and df_path != "Dockerfile" else ""
-            try:
-                svc_port = int(single.get("port"))
-            except (TypeError, ValueError):
-                svc_port = 8000
-            global_commands.extend([
-                f"docker build -t {svc_name}:latest{df_flag} .",
+            provided_port = single.get("port")
+            svc_port = int(provided_port) if provided_port is not None else 8000
+            build_ctx = _normalize_ctx(str(single.get("build_context", ".") or "."))
+            single_execution_root = _normalize_ctx(str(single.get("execution_root", ".") or "."))
+            single_cmds = [
+                f"docker build -t {svc_name}:latest{df_flag} {build_ctx}",
                 f"docker run --rm -p {svc_port}:{svc_port} {svc_name}:latest",
-            ])
+            ]
+            global_commands.extend(single_cmds)
+            global_with_execution_root.extend(
+                [{"command": cmd, "execution_root": single_execution_root} for cmd in single_cmds]
+            )
 
-    state["commands"] = {
+    # Internal hints consumed by downstream generator nodes.
+    state["command_hints"] = {
         "by_service": by_service,
         "global": global_commands,
     }
+
+    # Public deploy contract: execution_root -> ordered commands to run from there.
+    commands_by_root: Dict[str, list[str]] = {}
+    for item in global_with_execution_root:
+        root = _normalize_ctx(str(item.get("execution_root", ".") or "."))
+        cmd = str(item.get("command", "")).strip()
+        if not cmd:
+            continue
+        commands_by_root.setdefault(root, []).append(cmd)
+
+    state["commands"] = commands_by_root
     return state

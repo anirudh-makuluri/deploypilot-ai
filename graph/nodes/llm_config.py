@@ -5,7 +5,7 @@ from graph.llm_retry import RetryConfig
 
 load_dotenv()
 
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
 _LLM_TEMPERATURES = {
     "llm_planner": 0.1,
