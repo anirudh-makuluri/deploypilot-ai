@@ -97,6 +97,42 @@ Alternative:
 uvicorn app:app --host 0.0.0.0 --port 8080
 ```
 
+## MCP Server
+
+The repo also includes a separate read-only MCP server for fetching stored analysis data from Supabase.
+
+Current v1 resource coverage:
+
+- `analysis-response://{response_id}`
+- `analysis-cache://{repo_url_b64}/{commit_sha}`
+- `analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}`
+- `analysis-cache://{repo_url_b64}/{commit_sha}/{package_path_b64}/{service_name_b64}`
+
+Encoding notes:
+
+- `repo_url_b64`, `package_path_b64`, and `service_name_b64` use URL-safe base64 without padding.
+- Cache reads are exact-key lookups. There is no fuzzy "latest" lookup in v1.
+- Returned payloads strip internal cache metadata like `_cache_package_path`.
+
+Run over stdio:
+
+```bash
+python mcp_server.py
+```
+
+Run over Streamable HTTP:
+
+```bash
+SD_MCP_TRANSPORT=streamable-http SD_MCP_PORT=8001 python mcp_server.py
+```
+
+Key env vars:
+
+- `SD_MCP_TRANSPORT`: `stdio`, `sse`, or `streamable-http` (default `stdio`)
+- `SD_MCP_HOST`: bind host for HTTP transports (default `127.0.0.1`)
+- `SD_MCP_PORT`: bind port for HTTP transports (default `8001`)
+- `SD_MCP_STREAMABLE_HTTP_PATH`: HTTP MCP path (default `/mcp`)
+
 ## Authentication and Cache Behavior
 
 Most mutating or live-compute endpoints require a bearer token header:
